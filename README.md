@@ -8,7 +8,7 @@ Functions include:
 - Differential methylation analysis of individual sites or codistributed regions, while accounting for any covariates, using beta binomial regression.
 - Identification of differentially methylated regions.
 
-Please see [vignette](https://github.com/AndyCGraham/methSimpy/blob/main/vignettes/vignette.ipynb) for examples of how to perform these tasks.
+Please see [vignette](https://github.com/AndyCGraham/pyMethTools/blob/main/vignettes/vignette.ipynb) for examples of how to perform these tasks.
 
 ### Installation
 ```bash
