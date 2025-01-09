@@ -1,0 +1,16 @@
+README.md
+setup.py
+pyMethTools/__init__.py
+pyMethTools/bbseq.py
+pyMethTools/comethyl.py
+pyMethTools/fit.py
+pyMethTools/sim.py
+pyMethTools.egg-info/PKG-INFO
+pyMethTools.egg-info/SOURCES.txt
+pyMethTools.egg-info/dependency_links.txt
+pyMethTools.egg-info/requires.txt
+pyMethTools.egg-info/top_level.txt
+tests/test_bbseq.py
+tests/test_cometh.py
+tests/test_fit.py
+tests/test_sim.py
