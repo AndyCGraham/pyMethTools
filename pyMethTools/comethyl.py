@@ -2,7 +2,6 @@ import numpy as np
 from scipy.optimize import minimize,Bounds
 from scipy.stats import betabinom
 from scipy.special import gammaln,binom,beta
-import polars as pl
 import pandas as pd
 import random
 from itertools import chain
