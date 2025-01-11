@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='pyMethTools',
-    version='0.1.0',    
+    version='0.2.0',    
     description='A Python package for analysis of targetted methylation data',
     url='https://github.com/AndyCGraham/methSimpy',
     author='Andy Graham',
