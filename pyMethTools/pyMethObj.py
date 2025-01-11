@@ -11,17 +11,35 @@ from ray.util.multiprocessing.pool import Pool
 import matplotlib.pyplot as plt
 import seaborn as sns
 import random
-from pyMethTools.fit_cpg import Corncob_2
+from pyMethTools.fit_cpg import Corncob_2,corncob_cpg_local
 
 
 class pyMethObj():
     """
-    A python class containing functions for analysis of targetted DNA methylation data.
-    Based on pycorncob (https://github.com/jgolob/pycorncob/tree/main), with adjustments for DNA methylation data.
-    Covariates or X should at least include an intercept column = 1
-    total and count should be a an array / series with one entry per observation
-    These must be in the same length and orientation as covariates
+    A Python class containing functions for analysis of targetted DNA methylation data.
+    These include:
+        Fitting beta binomial models to cpgs, inferring parameters for the mean abundance, dispersion, and any other given covariates: fit_betabinom().
+        Differential methylation analysis by assessing the statistical significance of covariate parameters, while finding contigous regions of codistributed 
+        cpgs with similar parameters, and testing if these are differentially methylated: bbseq().
+        Getting regression results for any contrast: get_contrast().
+        Simulating new data based on fitted data: sim_multiple_cpgs().
     
+    Beta binomial fitting to CpGs is based on a method implemented by pycorncob (https://github.com/jgolob/pycorncob/tree/main), and concieved by 
+    https://doi.org/10.1214/19-AOAS1283, with some adjustments for DNA methylation data.
+
+    Init Parameters:
+        meth (2D numpy array): Count table of methylated reads at each cpg (rows) for each sample (columns).
+        coverage (2D numpy array): Count table of total reads at each cpg (rows) for each sample (columns).
+        target_regions (optional: 1D numpy array): Array of same length as number of cpgs in meth/coverage, specifying which target region each cpg belongs to.
+        covs (optional: pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the mean parameter, 
+        with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
+        If not supplied will form only an intercept column.
+        covs_disp (optional: pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion parameter, 
+        with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
+        If not supplied will form only an intercept column
+        phi_init (float, default: 0.5): Initial value of the dispersion parameter of the beta binomial model fit to each cpg.
+        maxiter (integer, default: 250): Maxinum number of iterations when fitting beta binomial model to a cpg (see numpy minimize).
+        maxfev (integer, default: 250): Maxinum number of evaluations when fitting beta binomial model to a cpg (see numpy minimize).
     """
     
     def __init__(self, meth: np.ndarray, coverage: np.ndarray, target_regions: np.ndarray, covs=None, covs_disp=None, phi_init: float=0.5, maxiter: int=250, maxfev: int=400):
@@ -29,8 +47,8 @@ class pyMethObj():
         Intitiate pyMethObj Class
 
         Parameters:
-            meth (2D numpy array): Count table of methylated reads at each cpg in the region (rows) for each sample (columns).
-            coverage (2D numpy array): Count table of total reads at each cpg in the region (rows) for each sample (columns).
+            meth (2D numpy array): Count table of methylated reads at each cpg (rows) for each sample (columns).
+            coverage (2D numpy array): Count table of total reads at each cpg (rows) for each sample (columns).
             target_regions (optional: 1D numpy array): Array of same length as number of cpgs in meth/coverage, specifying which target region each cpg belongs to.
             covs (optional: pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the mean parameter, 
             with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
@@ -793,52 +811,3 @@ class pyMethObj():
         """
         seen = set()
         return [x for x in sequence if not (x in seen or seen.add(x))]
-
-
-def corncob_cpg_local(site,meth,coverage,X,X_star,region=None,res=True,LL=False):
-    """
-    Perform differential methylation analysis on a single cpg using beta binomial regression.
-
-    Parameters:
-        region (integer, float, or string): Name of the region being analysed.
-        site (integer, float, or string): Name of cpg.
-        meth (2D numpy array): Count table of methylated reads at each cpg in the region (rows) for each sample (columns).
-        coverage (2D numpy array): Count table of total reads at each cpg in the region (rows) for each sample (columns).
-        X (pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the mean parameter, 
-        with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-        If not supplied will form only an intercept column.
-        X_star (pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion parameter, 
-        with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-        If not supplied will form only an intercept column.
-        min_cpgs (integer, default: 3): Minimum length of a dmr.
-        res (boolean, default: True): Whether to return regression results.
-        LL (boolean, default: False): Whether to return model log likelihood.
-        
-        
-    Returns:
-        pandas dataframe (optional, depending in res parameter): Dataframe containing estimates of coeficents for the cpg. 
-        float (optional, depending in LL parameter): Model log likelihood
-    """
-    cc = Corncob_2(
-                total=coverage,
-                count=meth,
-                X=X,
-                X_star=X_star
-            )
-    
-    e_m = cc.fit()
-    if res:
-        res = cc.waltdt()[0]
-        if region != None:
-            res["site"] = f'{region}_{site}'
-            res["region"] = f'{region}'
-            site=site.split("-")
-            res["range"] = [range(int(site[0]),int(site[1])+1) for _ in range(res.shape[0])]
-        else:
-            res["site"] = site
-        if LL:
-            return res,-e_m.fun
-        else: 
-            return res
-    else:
-        return -e_m.fun
