@@ -258,3 +258,51 @@ class Corncob_2():
         self.LogLike = -1*minimize_res.fun
         
         return minimize_res
+
+def corncob_cpg_local(site,meth,coverage,X,X_star,region=None,res=True,LL=False):
+    """
+    Perform differential methylation analysis on a single cpg using beta binomial regression.
+
+    Parameters:
+        region (integer, float, or string): Name of the region being analysed.
+        site (integer, float, or string): Name of cpg.
+        meth (2D numpy array): Count table of methylated reads at each cpg in the region (rows) for each sample (columns).
+        coverage (2D numpy array): Count table of total reads at each cpg in the region (rows) for each sample (columns).
+        X (pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the mean parameter, 
+        with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
+        If not supplied will form only an intercept column.
+        X_star (pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion parameter, 
+        with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
+        If not supplied will form only an intercept column.
+        min_cpgs (integer, default: 3): Minimum length of a dmr.
+        res (boolean, default: True): Whether to return regression results.
+        LL (boolean, default: False): Whether to return model log likelihood.
+        
+        
+    Returns:
+        pandas dataframe (optional, depending in res parameter): Dataframe containing estimates of coeficents for the cpg. 
+        float (optional, depending in LL parameter): Model log likelihood
+    """
+    cc = Corncob_2(
+                total=coverage,
+                count=meth,
+                X=X,
+                X_star=X_star
+            )
+    
+    e_m = cc.fit()
+    if res:
+        res = cc.waltdt()[0]
+        if region != None:
+            res["site"] = f'{region}_{site}'
+            res["region"] = f'{region}'
+            site=site.split("-")
+            res["range"] = [range(int(site[0]),int(site[1])+1) for _ in range(res.shape[0])]
+        else:
+            res["site"] = site
+        if LL:
+            return res,-e_m.fun
+        else: 
+            return res
+    else:
+        return -e_m.fun
