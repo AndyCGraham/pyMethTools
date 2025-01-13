@@ -49,7 +49,7 @@ def cometh(bbseq):
 
 @pytest.fixture
 def sim(bbseq):
-    return bbseq.sim_multiple_cpgs(sample_size=15,use_codistrib_regions=True,ncpu=1,adjust_factor=2,n_diff_regions=2)
+    return bbseq.sim_multiple_cpgs(sample_size=15,use_codistrib_regions=True,ncpu=1,adjust_factor=[0.05,0.025],n_diff_regions=2)
 
 @pytest.fixture
 def diff_data():
@@ -113,19 +113,19 @@ def test_adjust_unchanged(sim):
     assert sum(sim[2] == 0) == 9
 
 def test_adjust_pos(sim):
-    assert sum(sim[2] == 2) == 3
+    assert sum(sim[2] == 0.05) == 3
 
 def test_adjust_neg(sim):
-    assert sum(sim[2] == -2) == 3
+    assert sum(sim[2] == -0.025) == 3
 
 def test_meth_unchanged(sim,data):
     assert all(abs(sim[0][sim[2]==0,:].mean(axis=1) - data[0][sim[2]==0,:].mean(axis=1))) < 5
 
 def test_meth_increased(sim,data):
-    assert all(sim[0][sim[2]==2,:].mean(axis=1) - data[0][sim[2]==2,:].mean(axis=1) > 0)
+    assert all(sim[0][sim[2]==0.05,:].mean(axis=1) - data[0][sim[2]==0.05,:].mean(axis=1) > 0)
 
 def test_meth_reduced(sim,data):
-    assert all(sim[0][sim[2]==-2,:].mean(axis=1) - data[0][sim[2]==-2,:].mean(axis=1) < 0)
+    assert all(sim[0][sim[2]==-0.025,:].mean(axis=1) - data[0][sim[2]==-0.025,:].mean(axis=1) < 0)
 
 def test_bbseq_cpg(bbseq_res):
     """

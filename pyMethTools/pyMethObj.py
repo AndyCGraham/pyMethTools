@@ -111,6 +111,8 @@ class pyMethObj():
         self.fits=[]
         self.cometh=[]
         self.codistrib_regions=[]
+        self.codistrib_region_beta_vals=[]
+        self.codistrib_region_mean_beta = []
         self.beta_vals = []
         self.region_cov = []
         self.region_cov_sd = []
@@ -239,7 +241,7 @@ class pyMethObj():
         return cc
 
     def sim_multiple_cpgs(self,covs=None,covs_disp=None,use_codistrib_regions: bool=True,read_depth: str|int="from_data",vary_read_depth=True,read_depth_sd: str|int|float="from_data",
-                          adjust_factor: str|int|float=0, diff_regions: list|np.ndarray=[],n_diff_regions: int=0,prop_pos: float=0.5,sample_size: int=100,ncpu: int=1):
+                          adjust_factor: float|list=0, diff_regions_up: list|np.ndarray=[],diff_regions_down: list|np.ndarray=[],n_diff_regions: list|int=0,prop_pos: float=0.5,sample_size: int=100,ncpu: int=1):
         """
         Simulate new samples based on existing samples.
     
@@ -257,9 +259,12 @@ class pyMethObj():
             vary_read_depth (boolean, default: True): Whether to vary sample read depth per sample (if false all coverage values will equal 'read_depth')
             read_depth_sd (integer or "from_data", default: "from_data"): Desired average standard deviation read depth between simulated samples. If "from_data" calculates average SD of read depth 
             per region between samples in object data, and uses this as read_depth_sd for simulations.
-            adjust_factor (float or integer, default: 0): The log2FoldChange of percent methylation, at 'diff_regions' or in 'n_diff_regions' in simulated samples.
-            diff_regions (List or numpy array, default: []): Names of regions to be affected by 'adjust_factor'.
-            n_diff_regions (integer, default: 0): If diff_regions not specified, the number of regions to be affected by 'adjust_factor'.
+            adjust_factor (float 0-1, default: 0): The percent methylation 'diff_regions' or 'n_diff_regions' will be altered by in simulated samples.
+            diff_regions_up (List or numpy array, default: []): Names of regions whose probability of methylation will be increased by 'adjust_factor'.
+            diff_regions_down (List or numpy array, default: []): Names of regions whose probability of methylation will be decreased by 'adjust_factor'.
+            n_diff_regions (integer or list, default: 0): If diff_regions not specified, the number of regions to be affected by 'adjust_factor'. Can be a list of length 2 specifying number regions to increase
+            or decrease in methylation.
+            and ne
             prop_pos (Float 0-1, default: 0.5): Which proportion of adjusted regions should be increased in methylation, versus decreased.
             sample_size (integer, default: 100): Number of samples to simulate.
             ncpu (integer, default: 1): Number of cpus to use. If > 1 will use a parallel backend with Ray.
@@ -274,7 +279,11 @@ class pyMethObj():
             assert all(read_depth>0) , "read_depth must be a positive integer"
         assert any([read_depth_sd == "from_data", isinstance(read_depth_sd,(list,float,int))]), "read_depth_sd must be 'from_data' or a positive integer or float"
         if isinstance(read_depth,(list,int)):
-            assert all(read_depth_sd>0) , "read_depth_sd must be positive"
+            assert read_depth_sd>0, "read_depth_sd must be positive"
+        if isinstance(adjust_factor,float):
+            assert all([adjust_factor <= 1, adjust_factor>=0]), "adjust_factor must be a float or list of floats of length 2 between 0 and 1"
+        if isinstance(adjust_factor,list):
+            assert all([adjust_factor < [1,1], adjust_factor > [0,0]]), "adjust_factor must be a float or list of floats of length 2 between 0 and 1"
         assert isinstance(ncpu,int), "ncpu must be positive integer"
         assert ncpu>0, "ncpu must be positive integer"
 
@@ -299,32 +308,54 @@ class pyMethObj():
         if not isinstance(covs_disp, pd.DataFrame):
             covs_disp = pd.DataFrame(np.vstack([np.tile(np.repeat(1,sample_size),(1,1)), np.tile(np.repeat(0,sample_size),(self.n_param_disp-1,1))]).T)
             covs_disp.columns=self.param_disp
-            
-        adjust_factors = np.repeat(0.0, self.ncpgs)
 
+        if isinstance(adjust_factor,(float,int)):
+            adj_pos=adj_neg=adjust_factor
+        else:
+            adj_pos,adj_neg=adjust_factor
+
+        if isinstance(n_diff_regions,int):
+            n_pos=int(n_diff_regions*prop_pos)
+            n_neg=int(n_diff_regions*(1-prop_pos))
+        else:
+            n_pos,n_neg=n_diff_regions
+
+        adjust_factors = np.repeat(0.0, self.ncpgs)
         if use_codistrib_regions:
             assert len(self.codistrib_regions) == self.ncpgs, "Run bbseq before simulating if codistrib_regions=True"
-            if len(diff_regions)>0 or n_diff_regions>0:
-                if len(diff_regions)>0:
-                    n_pos=int(len(diff_regions)*prop_pos)
-                    n_neg=int(len(diff_regions)*(1-prop_pos))
-                    diff_regions_up = random.sample(diff_regions,n_pos)
-                    diff_regions_down = diff_regions[~np.isin(cometh_regions,n_neg)]
-                elif(n_diff_regions>0):
+            if len(diff_regions_up)>0 or len(diff_regions_down)>0 or n_pos>0 or n_neg>0:
+                if all([len(diff_regions_up)==0,len(diff_regions_down)==0, any([n_pos>0 or n_neg>0])]):
                     independent_regions = np.array([region for region in self.unique(self.codistrib_regions) if "_" in region])
-                    n_pos=int(n_diff_regions*prop_pos)
-                    n_neg=int(n_diff_regions*(1-prop_pos))
-                    diff_regions_up = np.random.choice(independent_regions,n_pos)
-                    diff_regions_down = np.random.choice(independent_regions[~np.isin(independent_regions,diff_regions_up)],n_neg)
-                adjust_factors[np.isin(self.codistrib_regions,diff_regions_up)] = adjust_factor
-                adjust_factors[np.isin(self.codistrib_regions,diff_regions_down)] = -adjust_factor
+                    if isinstance(self.codistrib_region_beta_vals,list):
+                        self.is_codistrib_region = np.isin(self.codistrib_regions,independent_regions)
+                        meth = self.sum_regions(self.codistrib_regions[self.is_codistrib_region],self.meth[self.is_codistrib_region]) 
+                        coverage = self.sum_regions(self.codistrib_regions[self.is_codistrib_region],self.coverage[self.is_codistrib_region]) 
+                        self.codistrib_region_beta_vals = meth / coverage
+                    if isinstance(self.codistrib_region_mean_beta,list):
+                        self.codistrib_region_mean_beta = self.codistrib_region_beta_vals.mean(axis=1)
+                    try:
+                        diff_regions_up = np.random.choice(independent_regions[(self.codistrib_region_mean_beta<=np.median(self.codistrib_region_mean_beta)) & (self.codistrib_region_mean_beta+adj_pos < 1)],n_pos)
+                    except:
+                        try:
+                            diff_regions_up = np.random.choice(independent_regions[self.codistrib_region_mean_beta+adj_pos < 0.99],n_pos)
+                        except:
+                            raise ValueError("Less than n_diff_regions regions with low enough probability methylation to be raised by adjust_factor without going above 100% methylated. Likely adjust_factor or n_diff_regions is too high.")
+                    try:
+                        diff_regions_down = np.random.choice(independent_regions[(self.codistrib_region_mean_beta>=np.median(self.codistrib_region_mean_beta)) & ~np.isin(independent_regions,diff_regions_up)],n_neg)
+                    except:
+                        try:
+                            diff_regions_down = np.random.choice(independent_regions[(self.codistrib_region_mean_beta-adj_neg > 0.01) & ~np.isin(independent_regions,diff_regions_up) & (self.codistrib_region_mean_beta-adj_neg > 0)],n_neg)
+                        except:
+                            raise ValueError("Less than n_diff_regions regions with high enough probability methylation to be lowered by adjust_factor without going below 0% methylated. Likely adjust_factor is or n_diff_regions is too high.")
+                adjust_factors[np.isin(self.codistrib_regions,diff_regions_up)] = adj_pos
+                adjust_factors[np.isin(self.codistrib_regions,diff_regions_down)] = -adj_neg
 
-        elif adjust_factor > 0:
+        elif adj_pos or adj_neg > 0:
             cpgs = np.array(range(self.ncpgs))
-            sites_up = np.random.choice(cpgs,int(n_diff_regions/2))
-            sites_down = np.random.choice(cpgs[~np.isin(cpgs,sites_up)],int(n_diff_regions/2))
-            adjust_factors[np.isin(cpgs,sites_up)] = adjust_factor
-            adjust_factors[np.isin(cpgs,sites_down)] = -adjust_factor
+            sites_up = np.random.choice(cpgs,n_pos)
+            sites_down = np.random.choice(cpgs[~np.isin(cpgs,sites_up)],n_neg)
+            adjust_factors[np.isin(cpgs,sites_up)] = adj_pos
+            adjust_factors[np.isin(cpgs,sites_down)] = -adj_neg
         
         if ncpu > 1: #Use ray for parallel processing
             ray.init(num_cpus=ncpu)    
@@ -353,7 +384,7 @@ class pyMethObj():
             read_depth (integer, default: 30): Desired average read depth of simulated samples.
             vary_read_depth (boolean, default: True): Whether to vary sample read depth per sample (if false all coverage values will equal 'read_depth')
             read_depth_sd (float or integer, default: 5): The standard deviation to vary read depth by, using a normal distribution with mean 'read_depth'.
-            adjust_factors (1D numpy array, default: 0): Array of the log2FoldChange each cpg will be altered by in the simulated versus template samples.
+            adjust_factors (1D numpy array, default: 0): Array of the percent methylation each cpg will be altered by in the simulated versus template samples.
             sample_size (integer, default: 100): Number of samples to simulate.
             
         Returns:
@@ -378,7 +409,7 @@ class pyMethObj():
         phi = expit(phi_wlink) 
             
         if any(adjust_factors != 0):
-            mu=mu*(2**adjust_factors)
+            mu=mu+adjust_factors
             mu=mu.clip(upper=1)
             a = mu*(1-phi)/phi
             b = (1-mu)*(1-phi)/phi
@@ -811,3 +842,21 @@ class pyMethObj():
         """
         seen = set()
         return [x for x in sequence if not (x in seen or seen.add(x))]
+
+    def sum_regions(self,regions,array):
+        """
+        Aggregates array values within predefined regions.
+    
+        Parameters:
+            regions (numpy array): Regions each column of array belongs to (p-dimensional vector).
+            array (numpy array): Array to be summarised.
+            return_order (boolean, default: False): Whether to return the order of regions in the summarised array (can change from regions).
+            
+        Returns:
+            numpy array: Summarised Array.
+        """
+        unique_regions, inverse_indices = np.unique(regions, return_inverse=True)
+        group_sums = np.zeros((len(unique_regions), array.shape[1]), dtype='int')
+        # Accumulate column sums within groups
+        np.add.at(group_sums, inverse_indices, array)
+        return group_sums[self.unique(inverse_indices),:]
