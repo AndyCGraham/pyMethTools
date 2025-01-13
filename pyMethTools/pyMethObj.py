@@ -138,6 +138,8 @@ class pyMethObj():
             ray.init(num_cpus=ncpu)    
             meth_id=ray.put(self.meth)
             coverage_id=ray.put(self.coverage)
+            X_id=ray.put(self.X)
+            X_star_id=ray.put(self.X_star)
             region_id=ray.put(self.target_regions)
             if chunksize>1:
                 result = ray.get([self.fit_betabinom_chunk.remote(individual_regions[chunk:chunk+chunksize],
@@ -145,14 +147,15 @@ class pyMethObj():
                               for chunk in range(0,len(set(self.individual_regions))+1,chunksize)])
                 self.fits = np.array(chain.from_iterable(result))
             else:
-                self.fits = np.array(ray.get([self.fit_cpg.remote(meth_id,coverage_id,region_id,self.maxiter,self.maxfev) 
-                              for region in self.individual_regions]))
+                self.fits = np.array(ray.get([self.fit_cpg.remote(cpg,meth_id,coverage_id,X_id,X_star_id) 
+                              for cpg in range(self.ncpgs)]))
             ray.shutdown()
             
         else:
             self.fits = np.array([self.fit_cpg_local(self.meth[cpg],self.coverage[cpg],self.X,self.X_star,self.maxiter,self.maxfev) 
                               for cpg in range(self.ncpgs)])
 
+    @staticmethod
     @ray.remote
     def fit_betabinom_chunk(chunk_regions,meth_id,coverage_id,region_id,maxiter=250,maxfev=250):
         """
@@ -174,9 +177,10 @@ class pyMethObj():
         chunk_result = [fit_cpg_local(meth_id[cpg],coverage_id[cpg],maxiter,maxfev) 
                         for cpg in range(meth_id.shape[0])]
         return chunk_result
-    
+
+    @staticmethod
     @ray.remote
-    def fit_cpg(cpg,meth_id,coverage_id,X_id,X_star_id,site_names_id):
+    def fit_cpg(cpg,meth_id,coverage_id,X_id,X_star_id):
         """
         Perform differential methylation analysis on a single cpg using beta binomial regression.
     
@@ -190,19 +194,18 @@ class pyMethObj():
             X_star_id (ray ID): ID of global value produced by ray.put(), pointing to a global dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion 
             parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
             If not supplied will form only an intercept column.
-            site_names_id (ray ID): ID of global value produced by ray.put(), pointing to a global array or list containing cpg names.
             
         Returns:
             pandas dataframe: Dataframe containing estimates of coeficents for the cpg. 
         """
         cc = Corncob_2(
-                    total=coverage_id[cpg,:],
-                    count=meth_id[cpg,:],
+                    total=coverage_id[cpg],
+                    count=meth_id[cpg],
                     X=X_id,
                     X_star=X_star_id
                 )
         
-        cc = cc.fit()
+        e_m = cc.fit()
         return cc
         
     @staticmethod
@@ -360,8 +363,8 @@ class pyMethObj():
         if ncpu > 1: #Use ray for parallel processing
             ray.init(num_cpus=ncpu)    
             sim_meth, sim_coverage = zip(*ray.get([self.sim.remote(np.vstack([fit.theta for fit in self.fits[self.target_regions==region]]),covs,covs_disp,
-                                                                   read_depth[self.individual_regions==region],vary_read_depth,read_depth_sd[self.individual_regions==region],
-                                                                   adjust_factors[self.target_regions==region],sample_size) for region in self.individual_regions]))
+                                                          read_depth[self.individual_regions==region],vary_read_depth,read_depth_sd[self.individual_regions==region],
+                                                     adjust_factors[self.target_regions==region],sample_size) for region in self.individual_regions]))
             ray.shutdown()
 
         else:
@@ -447,8 +450,9 @@ class pyMethObj():
             coverage = np.tile(np.random.normal(read_depth,read_depth_sd,sample_size).astype(int),(params.shape[0],1))
         else:
             coverage=np.empty((params.shape[0],sample_size),dtype=int)
-            coverage.fill(30)
-    
+            coverage.fill(read_depth)
+        coverage=np.clip(coverage, a_min=1,a_max=None)
+
         mu_wlink = np.matmul(
                 X,
                 params[:,:X.shape[1]].T
@@ -461,7 +465,7 @@ class pyMethObj():
         phi = expit(phi_wlink) 
             
         if any(adjust_factors != 0):
-            mu=mu*(2**adjust_factors)
+            mu=mu+adjust_factors
             mu=mu.clip(upper=1)
             a = mu*(1-phi)/phi
             b = (1-mu)*(1-phi)/phi
