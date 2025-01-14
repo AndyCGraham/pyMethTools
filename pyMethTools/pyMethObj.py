@@ -11,6 +11,7 @@ from ray.util.multiprocessing.pool import Pool
 import matplotlib.pyplot as plt
 import seaborn as sns
 import random
+from pyMethTools.fit_cpg import Corncob_2,corncob_cpg_local
 
 
 class pyMethObj():

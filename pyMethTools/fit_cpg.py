@@ -238,16 +238,20 @@ class Corncob_2():
             result_table_disp
         ))
     
-    def fit(self, start_params=None, maxiter=10000, maxfun=5000, method='Nelder-Mead', **kwds):
+    def fit(self, start_params=None, maxiter=10000, maxfev=5000, method='Nelder-Mead', **kwds):
         if start_params == None:
             # Reasonable starting values
-            start_params = self.corncob_init()
+            try:
+                start_params = self.corncob_init()
+            except:
+                start_params = np.repeat(logit(self.phi_init),self.n_param_abd) + ([logit(self.phi_init)] * self.n_param_disp)
         
         # Fit the model using Nelder-Mead method and scipy minimize
         minimize_res = minimize(
             self.beta_binomial_log_likelihood,
             start_params,
-            method=method
+            method=method,
+            options={"maxiter": maxiter, "maxfev":maxfev}
         )
         self.fit_out = minimize_res
         self.theta = minimize_res.x
