@@ -11,7 +11,6 @@ from ray.util.multiprocessing.pool import Pool
 import matplotlib.pyplot as plt
 import seaborn as sns
 import random
-from pyMethTools.fit_cpg import Corncob_2,corncob_cpg_local
 
 
 class pyMethObj():
@@ -147,7 +146,7 @@ class pyMethObj():
                               for chunk in range(0,len(set(self.individual_regions))+1,chunksize)])
                 self.fits = np.array(chain.from_iterable(result))
             else:
-                self.fits = np.array(ray.get([self.fit_cpg.remote(cpg,meth_id,coverage_id,X_id,X_star_id) 
+                self.fits = np.array(ray.get([self.fit_cpg.remote(cpg,meth_id,coverage_id,X_id,X_star_id,self.maxiter,self.maxfev) 
                               for cpg in range(self.ncpgs)]))
             ray.shutdown()
             
@@ -180,7 +179,7 @@ class pyMethObj():
 
     @staticmethod
     @ray.remote
-    def fit_cpg(cpg,meth_id,coverage_id,X_id,X_star_id):
+    def fit_cpg(cpg,meth_id,coverage_id,X_id,X_star_id,maxiter=250,maxfev=400):
         """
         Perform differential methylation analysis on a single cpg using beta binomial regression.
     
@@ -205,11 +204,11 @@ class pyMethObj():
                     X_star=X_star_id
                 )
         
-        e_m = cc.fit()
+        e_m = cc.fit(maxiter=maxiter,maxfev=maxfev)
         return cc
         
     @staticmethod
-    def fit_cpg_local(meth,coverage,X,X_star,maxiter,maxfev):
+    def fit_cpg_local(meth,coverage,X,X_star,maxiter=250,maxfev=400):
         """
         Perform differential methylation analysis on a single cpg using beta binomial regression.
     
@@ -240,7 +239,7 @@ class pyMethObj():
                     X_star=X_star
                 )
         
-        e_m = cc.fit()
+        e_m = cc.fit(maxiter=maxiter,maxfev=maxfev)
         return cc
 
     def sim_multiple_cpgs(self,covs=None,covs_disp=None,use_codistrib_regions: bool=True,read_depth: str|int="from_data",vary_read_depth=True,read_depth_sd: str|int|float="from_data",
@@ -515,8 +514,8 @@ class pyMethObj():
                 self.cpg_res = pd.concat(cpg_res)
                 self.region_res = pd.concat(region_res)
                 tmp=self.region_res[~self.region_res["site"].duplicated()]
-                self.codistrib_regions = np.array([tmp[tmp["region"]==str(region)]["site"].iloc[next((i for i, sublist in enumerate(tmp[tmp["region"]==str(region)]["range"]) if cpg in sublist ), -1)]
-                 if any(int(pos) in reg for reg in tmp[tmp["region"]==str(region)]["range"]) else cpg for pos,cpg,region in zip(self.region_cpg_indices,range(self.ncpgs), self.target_regions)])
+                self.codistrib_regions = np.array([tmp[tmp["region"]==str(region)]["site"].iloc[next((i for i, sublist in enumerate(tmp[tmp["region"]==str(region)]["range"]) if pos in sublist ), -1)]
+                 if any(int(pos) in reg for reg in tmp[tmp["region"]==str(region)]["range"]) else site_names[cpg] for pos,cpg,region in zip(self.region_cpg_indices,range(self.ncpgs), self.target_regions)])
         
             else:
                 cpg_res = ray.get([self.corncob_cpg.remote(fits[cpg],site_names[cpg]) for cpg in range(meth.shape[0])]) 
@@ -534,8 +533,8 @@ class pyMethObj():
                 self.cpg_res = pd.concat(cpg_res)
                 self.region_res = pd.concat(region_res)
                 tmp=self.region_res[~self.region_res["site"].duplicated()]
-                self.codistrib_regions = np.array([tmp[tmp["region"]==str(region)]["site"].iloc[next((i for i, sublist in enumerate(tmp[tmp["region"]==str(region)]["range"]) if cpg in sublist ), -1)]
-                 if any(int(pos) in reg for reg in tmp[tmp["region"]==str(region)]["range"]) else cpg for pos,cpg,region in zip(self.region_cpg_indices,range(self.ncpgs), self.target_regions)])
+                self.codistrib_regions = np.array([tmp[tmp["region"]==str(region)]["site"].iloc[next((i for i, sublist in enumerate(tmp[tmp["region"]==str(region)]["range"]) if pos in sublist ), -1)]
+                 if any(int(pos) in reg for reg in tmp[tmp["region"]==str(region)]["range"]) else site_names[cpg] for pos,cpg,region in zip(self.region_cpg_indices,range(self.ncpgs), self.target_regions)])
         
             else:
                 cpg_res = [self.corncob_cpg_local(fits[cpg],site_names[cpg]) for cpg in range(meth.shape[0])]
