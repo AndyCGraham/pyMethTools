@@ -99,11 +99,7 @@ class Corncob_2():
     
         # Compute log-likelihood in a vectorized manner
         LL = stats.betabinom.logpmf(self.count, self.total, a, b)
-        LL = np.sum(LL)
-        # if LL > 0:
-        return -LL  # Negative for minimization
-        # else:
-            # return 100000.0
+        return -np.sum(LL)
 
     # Numerical Hessian calculation
     def compute_hessian(self):
@@ -343,16 +339,12 @@ def corncob_cpg_local(site,meth,coverage,X,X_star,maxiter=500,maxfev=500,region=
     
     e_m = cc.fit(maxiter=maxiter,maxfev=maxfev,start_params=start_params)
     if res:
-        if cc.LogLike < 0:
-            res = cc.waltdt()[0].to_numpy()
-        else:
-            res = np.empty((X.shape[1],4,))
-            res[:] = np.nan
+        res = cc.waltdt()[0].to_numpy()
             
         if region != None:
             site_range=site.split("-")
             res = np.hstack([res, np.tile(f'{region}',(res.shape[0],1)), np.tile(f'{region}_{site}',(res.shape[0],1)), 
-                             np.tile(int(site_range[0]),(res.shape[0],1)), np.tile(int(site_range[1])+1,(res.shape[0],1))])
+                             np.tile(int(site_range[0]),(res.shape[0],1)), np.tile(int(site_range[1]),(res.shape[0],1))])
         if LL:
             return res,-e_m.fun
         else: 

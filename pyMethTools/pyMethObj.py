@@ -725,78 +725,38 @@ class pyMethObj():
         n_samples = fits[start].X.shape[0]
         n_params=n_params_abd+n_params_disp
         bad_cpgs=0
-        
-        while fits[start].LogLike > 0: #Check start cpg is well fitted
-            null_df = np.empty((n_params_abd,4,))
-            null_df[:] = np.nan
-            cpg_res += [null_df]
-            start+=1
-            end+=1
-            if start > len(fits)-1:
-                region_res = None
-                cpg_res = np.vstack(cpg_res)
-                return cpg_res,region_res
             
         cpg_res += [fits[start].waltdt()[0]] #Add individual cpg res to cpg result table
-        ll_s = fits[start].LogLike 
         
         while end < len(fits)+1:
 
-            if fits[start].LogLike < 0: #Check start cpg is well fitted
-
-                if fits[end-1].LogLike < 0: #Check end cpg is well fitted
-
-                    cpg_res += [fits[end-1].waltdt()[0]] #Add individual cpg res to cpg result table
-                    
-                    if start+min_cpgs < len(fits)+1: #Can we form a codistrib region
-                
-                        cc_theta=np.vstack([fits[start].theta,fits[end-1].theta]).mean(axis=0) #Estimate of joint parameters
-                        ll_c = beta_binomial_log_likelihood(np.hstack([fits[start].count,fits[end-1].count]),np.hstack([fits[start].total,fits[end-1].total]),
-                                                            np.vstack([fits[start].X,fits[end-1].X]),np.vstack([fits[start].X_star,fits[end-1].X_star]),
-                                                            fits[start].theta,n_params_abd,n_params_disp)
-                        
-                        ll_s = np.array([fits[start].LogLike,fits[end-1].LogLike]).sum()
-                        n_samples=fits[start].X.shape[0]+fits[end-1].X.shape[0]
-                        bic_c = -2 * ll_c + (n_params) * np.log(n_samples) 
-                        bic_s = -2 * ll_s + (n_params*2) * np.log(n_samples) 
-                        
-                        end += 1
+            cpg_res += [fits[end-1].waltdt()[0]] #Add individual cpg res to cpg result table
             
-                        #If sites come from the same distribution, keep extending the region
-                        if bic_c < bic_s:
-                            ll_s=ll_c
+            if start+min_cpgs < len(fits)+1: #Can we form a codistrib region
+        
+                cc_theta=np.vstack([fits[start].theta,fits[end-1].theta]).mean(axis=0) #Estimate of joint parameters
+                ll_c = beta_binomial_log_likelihood(np.hstack([fits[start].count,fits[end-1].count]),np.hstack([fits[start].total,fits[end-1].total]),
+                                                    np.vstack([fits[start].X,fits[end-1].X]),np.vstack([fits[start].X_star,fits[end-1].X_star]),
+                                                    fits[start].theta,n_params_abd,n_params_disp)
+                
+                ll_s = np.array([fits[start].LogLike,fits[end-1].LogLike]).sum()
+                n_samples=fits[start].X.shape[0]+fits[end-1].X.shape[0]
 
-                        else: # Else start a new region
-                            if (end-start) > min_cpgs+1: #Save region if number of cpgs > min_cpgs
-                                cc_theta=np.vstack([fits[cpg].theta for cpg in range(start,end-2)]).mean(axis=0) #Estimate of joint parameters
-                                region_res+=[corncob_cpg_local(f'{start}-{end-3}',np.vstack([fit.meth for fit in fits[start:end-2]]).sum(axis=0),np.vstack([fit.coverage for fit in fits[start:end-2]]).sum(axis=0),
-                                                               X=X,X_star=X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)] #Add regions results to results table
-                            start=end-2
-
-                    else:
-                        end += 1
-                            
-                else: # Else continue unless two bad in a row, then start a new region
-                    bad_cpgs+=1
-                    null_df = np.empty((n_params_abd,4,))
-                    null_df[:] = np.nan
-                    cpg_res += [null_df]
-                    end+=1
-                    if bad_cpgs == 2:
-                        if (end-start) >= min_cpgs+bad_cpgs: #Save region if number of cpgs > min_cpgs
-                            cc_theta=np.vstack([fits[cpg].theta for cpg in range(start,end-bad_cpgs)]).mean(axis=0) #Estimate of joint parameters
-                            region_res+=[corncob_cpg_local(f'{start}-{end-3}',np.vstack([fit.meth for fit in fits[start:end-bad_cpgs]]).sum(axis=0),np.vstack([fit.coverage for fit in fits[start:end-bad_cpgs]]).sum(axis=0),
-                                                           X=X,X_star=X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)] #Add regions results to results table
-                        start=end-2
-                        end=start+2
-                        bad_cpgs=0
-
+                bic_c = -2 * ll_c + (n_params) * np.log(n_samples) 
+                bic_s = -2 * ll_s + (n_params*2) * np.log(n_samples) 
+                
+                end += 1
+    
+                #If sites come from the same distribution, keep extending the region, else start a new region
+                if any([all([ll_c<0, bic_c > bic_s]),all([ll_c>0, bic_c < bic_s])]):
+                    if (end-start) > min_cpgs+1: #Save region if number of cpgs > min_cpgs
+                        cc_theta=np.vstack([fits[cpg].theta for cpg in range(start,end-2)]).mean(axis=0) #Estimate of joint parameters
+                        region_res+=[corncob_cpg_local(f'{start}-{end-3}',np.vstack([fit.meth for fit in fits[start:end-2]]).sum(axis=0),np.vstack([fit.coverage for fit in fits[start:end-2]]).sum(axis=0),
+                                                       X=X,X_star=X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)] #Add regions results to results table
+                    start=end-2
+    
             else:
-                null_df = np.empty((n_params_abd,4,))
-                null_df[:] = np.nan
-                cpg_res += [null_df]
-                start+=1
-                end=start+2
+                end += 1
            
     
         if (end-start) > min_cpgs+1: #Save final region if number of cpgs > min_cpgs
@@ -804,8 +764,6 @@ class pyMethObj():
                                            X=X,X_star=X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)]
     
         cpg_res = np.vstack(cpg_res)
-        # cpg_res = np.hstack([cpg_res, np.tile(np.repeat(range(0,int(cpg_res.shape[0]/3)),3),(1,1)).T])
-        # cpg_res = np.hstack([cpg_res, np.tile(f"{region}",(cpg_res.shape[0],1))])
         if not region_res:
             region_res = None
         else:
@@ -841,83 +799,44 @@ class pyMethObj():
         n_samples = fits[start].X.shape[0]
         n_params=n_params_abd+n_params_disp
         bad_cpgs=0
-        
-        while fits[start].LogLike > 0: #Check start cpg is well fitted
-            null_df = np.empty((n_params_abd,4,))
-            null_df[:] = np.nan
-            cpg_res += [null_df]
-            start+=1
-            end+=1
-            if start > len(fits)-1:
-                region_res = None
-                cpg_res = np.vstack(cpg_res)
-                return cpg_res,region_res
             
         cpg_res += [fits[start].waltdt()[0]] #Add individual cpg res to cpg result table
         ll_s = fits[start].LogLike 
         
         while end < len(fits)+1:
 
-            if fits[start].LogLike < 0: #Check start cpg is well fitted
-
-                if fits[end-1].LogLike < 0: #Check end cpg is well fitted
-
-                    cpg_res += [fits[end-1].waltdt()[0]] #Add individual cpg res to cpg result table
-                    
-                    if start+min_cpgs < len(fits)+1: #Can we form a codistrib region
-                
-                        cc_theta=np.vstack([fits[start].theta,fits[end-1].theta]).mean(axis=0) #Estimate of joint parameters
-                        ll_c = beta_binomial_log_likelihood(np.hstack([fits[start].count,fits[end-1].count]),np.hstack([fits[start].total,fits[end-1].total]),
-                                                            np.vstack([fits[start].X,fits[end-1].X]),np.vstack([fits[start].X_star,fits[end-1].X_star]),
-                                                            fits[start].theta,n_params_abd,n_params_disp)
-                        
-                        ll_s = np.array([fits[start].LogLike,fits[end-1].LogLike]).sum()
-                        n_samples=fits[start].X.shape[0]+fits[end-1].X.shape[0]
-                        bic_c = -2 * ll_c + (n_params) * np.log(n_samples) 
-                        bic_s = -2 * ll_s + (n_params*2) * np.log(n_samples) 
-                        
-                        end += 1
+            cpg_res += [fits[end-1].waltdt()[0]] #Add individual cpg res to cpg result table
             
-                        #If sites come from the same distribution, keep extending the region
-                        if bic_c < bic_s:
-                            ll_s=ll_c
+            if start+min_cpgs < len(fits)+1: #Can we form a codistrib region
+        
+                cc_theta=np.vstack([fits[start].theta,fits[end-1].theta]).mean(axis=0) #Estimate of joint parameters
+                ll_c = beta_binomial_log_likelihood(np.hstack([fits[start].count,fits[end-1].count]),np.hstack([fits[start].total,fits[end-1].total]),
+                                                    np.vstack([fits[start].X,fits[end-1].X]),np.vstack([fits[start].X_star,fits[end-1].X_star]),
+                                                    fits[start].theta,n_params_abd,n_params_disp)
+                
+                ll_s = np.array([fits[start].LogLike,fits[end-1].LogLike]).sum()
+                n_samples=fits[start].X.shape[0]+fits[end-1].X.shape[0]
 
-                        else: # Else start a new region
-                            if (end-start) > min_cpgs+1: #Save region if number of cpgs > min_cpgs
-                                cc_theta=np.vstack([fits[cpg].theta for cpg in range(start,end-2)]).mean(axis=0) #Estimate of joint parameters
-                                region_res+=[corncob_cpg_local(f'{start}-{end-3}',np.vstack([fit.meth for fit in fits[start:end-2]]).sum(axis=0),np.vstack([fit.coverage for fit in fits[start:end-2]]).sum(axis=0),
-                                                               fits[start].X,fits[start].X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)] #Add regions results to results table
-                            start=end-2
-
-                    else:
-                        end += 1
-                            
-                else: # Else continue unless two bad in a row, then start a new region
-                    bad_cpgs+=1
-                    null_df = np.empty((n_params_abd,4,))
-                    null_df[:] = np.nan
-                    cpg_res += [null_df]
-                    end+=1
-                    if bad_cpgs == 2:
-                        if (end-start) >= min_cpgs+bad_cpgs: #Save region if number of cpgs > min_cpgs
-                            cc_theta=np.vstack([fits[cpg].theta for cpg in range(start,end-bad_cpgs)]).mean(axis=0) #Estimate of joint parameters
-                            region_res+=[corncob_cpg_local(f'{start}-{end-3}',np.vstack([fit.meth for fit in fits[start:end-bad_cpgs]]).sum(axis=0),np.vstack([fit.coverage for fit in fits[start:end-bad_cpgs]]).sum(axis=0),
-                                                           fits[start].X,fits[start].X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)] #Add regions results to results table
-                        start=end-2
-                        end=start+2
-                        bad_cpgs=0
-
+                bic_c = -2 * ll_c + (n_params) * np.log(n_samples) 
+                bic_s = -2 * ll_s + (n_params*2) * np.log(n_samples) 
+                
+                end += 1
+    
+                #If sites come from the same distribution, keep extending the region, else start a new region
+                if any([all([ll_c<0, bic_c > bic_s]),all([ll_c>0, bic_c < bic_s])]):
+                    if (end-start) > min_cpgs+1: #Save region if number of cpgs > min_cpgs
+                        cc_theta=np.vstack([fits[cpg].theta for cpg in range(start,end-2)]).mean(axis=0) #Estimate of joint parameters
+                        region_res+=[corncob_cpg_local(f'{start}-{end-3}',np.vstack([fit.meth for fit in fits[start:end-2]]).sum(axis=0),np.vstack([fit.coverage for fit in fits[start:end-2]]).sum(axis=0),
+                                                       X=X,X_star=X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)] #Add regions results to results table
+                    start=end-2
+    
             else:
-                null_df = np.empty((n_params_abd,4,))
-                null_df[:] = np.nan
-                cpg_res += [null_df]
-                start+=1
-                end=start+2
+                end += 1
            
     
         if (end-start) > min_cpgs+1: #Save final region if number of cpgs > min_cpgs
             region_res+=[corncob_cpg_local(f'{start}-{end}',np.vstack([fit.meth for fit in fits[start:end]]).sum(axis=0),np.vstack([fit.coverage for fit in fits[start:end]]).sum(axis=0),
-                                           X=fits[start].X,X_star=fits[start].X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)]
+                                           X=X,X_star=X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)]
     
         cpg_res = np.vstack(cpg_res)
         # cpg_res = np.hstack([cpg_res, np.tile(np.repeat(range(0,int(cpg_res.shape[0]/3)),3),(1,1)).T])
