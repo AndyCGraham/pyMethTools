@@ -11,8 +11,7 @@ from ray.util.multiprocessing.pool import Pool
 import matplotlib.pyplot as plt
 import seaborn as sns
 import random
-from pyMethTools.fit_cpg import Corncob_2,corncob_cpg_local
-
+from pyMethTools.fit_cpg import Corncob_2,fit_cpg_local,corncob_cpg_local
 
 class pyMethObj():
     """
@@ -42,7 +41,7 @@ class pyMethObj():
         maxfev (integer, default: 250): Maxinum number of evaluations when fitting beta binomial model to a cpg (see numpy minimize).
     """
     
-    def __init__(self, meth: np.ndarray, coverage: np.ndarray, target_regions: np.ndarray, covs=None, covs_disp=None, phi_init: float=0.5, maxiter: int=250, maxfev: int=400):
+    def __init__(self, meth: np.ndarray, coverage: np.ndarray, target_regions: np.ndarray, covs=None, covs_disp=None, phi_init: float=0.5, maxiter: int=500, maxfev: int=500):
         """
         Intitiate pyMethObj Class
 
@@ -68,8 +67,8 @@ class pyMethObj():
         assert isinstance(maxfev,int), "maxfev must be positive integer"
         assert maxfev>0, "maxfev must be positive integer"
         
-        self.meth = meth
-        self.coverage = coverage
+        self.meth = meth.astype('float64')
+        self.coverage = coverage.astype('float64')
         self.ncpgs = meth.shape[0]
         self.target_regions = target_regions
         self.individual_regions = self.unique(target_regions)
@@ -88,8 +87,8 @@ class pyMethObj():
 
         assert covs_disp.shape[0] == meth.shape[1], "covs_disp must have one row per sample (column in meth)"
         
-        self.X = covs
-        self.X_star = covs_disp
+        self.X = covs.to_numpy().astype('float64')
+        self.X_star = covs_disp.to_numpy().astype('float64')
         self.param_abd = covs.columns
         self.n_param_abd = len(covs.columns)
         self.param_disp = covs_disp.columns
@@ -116,8 +115,9 @@ class pyMethObj():
         self.beta_vals = []
         self.region_cov = []
         self.region_cov_sd = []
+        self.disp_intercept = []
 
-    def fit_betabinom(self,chunksize: int=1,ncpu: int=1):
+    def fit_betabinom(self,chunksize: int=1,ncpu: int=1,start_params=[],maxiter: int=500, maxfev: int=500):
         """
         Fit beta binomial model to DNA methylation data.
     
@@ -133,6 +133,8 @@ class pyMethObj():
         assert chunksize>0, "chunksize must be positive integer"
         assert isinstance(ncpu,int), "ncpu must be positive integer"
         assert ncpu>0, "ncpu must be positive integer"
+
+        cpgs=np.array(range(self.ncpgs))
     
         if ncpu > 1: #Use ray for parallel processing
             ray.init(num_cpus=ncpu)    
@@ -141,19 +143,21 @@ class pyMethObj():
             X_id=ray.put(self.X)
             X_star_id=ray.put(self.X_star)
             region_id=ray.put(self.target_regions)
+            cpg_id=ray.put(cpgs)
             if chunksize>1:
-                result = ray.get([self.fit_betabinom_chunk.remote(individual_regions[chunk:chunk+chunksize],
+                self.fits = ray.get([self.fit_betabinom_chunk.remote(individual_regions[chunk:chunk+chunksize],
                                                          meth_id,coverage_id,region_id,self.maxiter,self.maxfev) 
                               for chunk in range(0,len(set(self.individual_regions))+1,chunksize)])
-                self.fits = np.array(chain.from_iterable(result))
             else:
-                self.fits = np.array(ray.get([self.fit_cpg.remote(cpg,meth_id,coverage_id,X_id,X_star_id,self.maxiter,self.maxfev) 
-                              for cpg in range(self.ncpgs)]))
+                self.fits = ray.get([self.fit_region.remote(cpg_id,region,meth_id,coverage_id,region_id,X_id,X_star_id,maxiter,maxfev,start_params,self.param_names_abd,self.param_names_disp) 
+                              for region in self.individual_regions])
+
             ray.shutdown()
             
         else:
-            self.fits = np.array([self.fit_cpg_local(self.meth[cpg],self.coverage[cpg],self.X,self.X_star,self.maxiter,self.maxfev) 
-                              for cpg in range(self.ncpgs)])
+            self.fits = [self.fit_region_local(cpgs,region,start_params) for region in self.individual_regions]
+
+        self.fits = np.array(list(chain.from_iterable(self.fits)))
 
     @staticmethod
     @ray.remote
@@ -180,7 +184,56 @@ class pyMethObj():
 
     @staticmethod
     @ray.remote
-    def fit_cpg(cpg,meth_id,coverage_id,X_id,X_star_id,maxiter=250,maxfev=400):
+    def fit_region(cpg_id,region,meth_id,coverage_id,region_id,X_id,X_star_id,maxiter=150,maxfev=150,start_params=[],param_names_abd=["intercept"],param_names_disp=["intercept"]):
+        """
+        Perform differential methylation analysis on a single cpg using beta binomial regression.
+    
+        Parameters:
+            cpg (integer, float, or string): Cpg row number in meth_id/coverage_id.
+            meth_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of methylated reads at each cpg (rows) for each sample (columns).
+            coverage_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of total reads at each cpg (rows) for each sample (columns).
+            X_id (ray ID): ID of global value produced by ray.put(), pointing to a global dataframe shape (number samples, number covariates) specifying the covariate design 
+            matrix for the mean parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
+            If not supplied will form only an intercept column.
+            X_star_id (ray ID): ID of global value produced by ray.put(), pointing to a global dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion 
+            parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
+            If not supplied will form only an intercept column.
+            
+        Returns:
+            pandas dataframe: Dataframe containing estimates of coeficents for the cpg. 
+        """
+        fits = np.array([fit_cpg_local(meth_id[cpg],coverage_id[cpg],X_id,X_star_id,maxiter,maxfev,start_params,param_names_abd,param_names_disp) 
+                              for cpg in cpg_id[region_id==region]])
+        
+        return fits
+
+    def fit_region_local(self,cpgs,region,start_params=[]):
+        """
+        Perform differential methylation analysis on a single cpg using beta binomial regression.
+    
+        Parameters:
+            cpg (integer, float, or string): Cpg row number in meth_id/coverage_id.
+            meth_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of methylated reads at each cpg (rows) for each sample (columns).
+            coverage_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of total reads at each cpg (rows) for each sample (columns).
+            X_id (ray ID): ID of global value produced by ray.put(), pointing to a global dataframe shape (number samples, number covariates) specifying the covariate design 
+            matrix for the mean parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
+            If not supplied will form only an intercept column.
+            X_star_id (ray ID): ID of global value produced by ray.put(), pointing to a global dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion 
+            parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
+            If not supplied will form only an intercept column.
+            
+        Returns:
+            pandas dataframe: Dataframe containing estimates of coeficents for the cpg. 
+        """
+
+        fits = np.array([self.fit_cpg_local(cpg,start_params) 
+                              for cpg in cpgs[self.target_regions==region]])
+        
+        return fits
+
+    @staticmethod
+    @ray.remote
+    def fit_cpg(cpg,meth,coverage,X,X_star,maxiter=150,maxfev=150,start_params=[],param_names_abd=["intercept"],param_names_disp=["intercept"]):
         """
         Perform differential methylation analysis on a single cpg using beta binomial regression.
     
@@ -199,17 +252,18 @@ class pyMethObj():
             pandas dataframe: Dataframe containing estimates of coeficents for the cpg. 
         """
         cc = Corncob_2(
-                    total=coverage_id[cpg],
-                    count=meth_id[cpg],
-                    X=X_id,
-                    X_star=X_star_id
+                    total=coverage[cpg],
+                    count=meth[cpg],
+                    X=X,
+                    X_star=X_star,
+                    param_names_abd=param_names_abd,
+                    param_names_disp=param_names_disp
                 )
         
-        e_m = cc.fit(maxiter=maxiter,maxfev=maxfev)
+        e_m = cc.fit(maxiter=maxiter,maxfev=maxfev,start_params=start_params)
         return cc
         
-    @staticmethod
-    def fit_cpg_local(meth,coverage,X,X_star,maxiter=250,maxfev=400):
+    def fit_cpg_local(self,cpg,start_params=[]):
         """
         Perform differential methylation analysis on a single cpg using beta binomial regression.
     
@@ -234,13 +288,15 @@ class pyMethObj():
             float (optional, depending in LL parameter): Model log likelihood
         """
         cc = Corncob_2(
-                    total=coverage,
-                    count=meth,
-                    X=X,
-                    X_star=X_star
+                    total=self.coverage[cpg],
+                    count=self.meth[cpg],
+                    X=self.X,
+                    X_star=self.X_star,
+                    param_names_abd=self.param_names_abd,
+                    param_names_disp=self.param_names_disp
                 )
         
-        e_m = cc.fit(maxiter=maxiter,maxfev=maxfev)
+        e_m = cc.fit(maxiter=self.maxiter,maxfev=self.maxfev,start_params=start_params)
         return cc
 
     def sim_multiple_cpgs(self,covs=None,covs_disp=None,use_codistrib_regions: bool=True,read_depth: str|int="from_data",vary_read_depth=True,read_depth_sd: str|int|float="from_data",
@@ -328,26 +384,30 @@ class pyMethObj():
             assert len(self.codistrib_regions) == self.ncpgs, "Run bbseq before simulating if codistrib_regions=True"
             if len(diff_regions_up)>0 or len(diff_regions_down)>0 or n_pos>0 or n_neg>0:
                 if all([len(diff_regions_up)==0,len(diff_regions_down)==0, any([n_pos>0 or n_neg>0])]):
-                    independent_regions = np.array([region for region in self.unique(self.codistrib_regions) if "_" in region])
+                    self.codistrib_regions_only = np.array([region for region in self.unique(self.codistrib_regions) if "_" in region])
                     if isinstance(self.codistrib_region_beta_vals,list):
-                        self.is_codistrib_region = np.isin(self.codistrib_regions,independent_regions)
+                        self.is_codistrib_region = np.isin(self.codistrib_regions,self.codistrib_regions_only)
                         meth = self.sum_regions(self.codistrib_regions[self.is_codistrib_region],self.meth[self.is_codistrib_region]) 
                         coverage = self.sum_regions(self.codistrib_regions[self.is_codistrib_region],self.coverage[self.is_codistrib_region]) 
                         self.codistrib_region_beta_vals = meth / coverage
                     if isinstance(self.codistrib_region_mean_beta,list):
                         self.codistrib_region_mean_beta = self.codistrib_region_beta_vals.mean(axis=1)
+                    if isinstance(self.disp_intercept,list):
+                        self.disp_intercept = np.array([max([expit(fit.theta[self.n_param_abd]) for fit in self.fits[self.codistrib_regions==region]]) for region in self.unique(self.codistrib_regions[self.is_codistrib_region])])
                     try:
-                        diff_regions_up = np.random.choice(independent_regions[(self.codistrib_region_mean_beta<=np.median(self.codistrib_region_mean_beta)) & (self.codistrib_region_mean_beta+adj_pos < 1)],n_pos)
+                        diff_regions_up = np.random.choice(self.codistrib_regions_only[(self.codistrib_region_mean_beta<=0.5) & (self.codistrib_region_mean_beta+adj_pos < 1) & (self.disp_intercept < 0.1)],n_pos)
                     except:
                         try:
-                            diff_regions_up = np.random.choice(independent_regions[self.codistrib_region_mean_beta+adj_pos < 0.99],n_pos)
+                            diff_regions_up = np.random.choice(self.codistrib_regions_only[self.codistrib_region_mean_beta+adj_pos < 0.99],n_pos)
                         except:
                             raise ValueError("Less than n_diff_regions regions with low enough probability methylation to be raised by adjust_factor without going above 100% methylated. Likely adjust_factor or n_diff_regions is too high.")
                     try:
-                        diff_regions_down = np.random.choice(independent_regions[(self.codistrib_region_mean_beta>=np.median(self.codistrib_region_mean_beta)) & ~np.isin(independent_regions,diff_regions_up)],n_neg)
+                        diff_regions_down = np.random.choice(self.codistrib_regions_only[(self.codistrib_region_mean_beta>=0.5) & (self.codistrib_region_mean_beta-adj_neg > 0) & (self.disp_intercept < 0.1)
+                                                             & ~np.isin(self.codistrib_regions_only,diff_regions_up)],n_neg)
                     except:
                         try:
-                            diff_regions_down = np.random.choice(independent_regions[(self.codistrib_region_mean_beta-adj_neg > 0.01) & ~np.isin(independent_regions,diff_regions_up) & (self.codistrib_region_mean_beta-adj_neg > 0)],n_neg)
+                            diff_regions_down = np.random.choice(self.codistrib_regions_only[(self.codistrib_region_mean_beta-adj_neg > 0.01) & ~np.isin(self.codistrib_regions_only,diff_regions_up) & 
+                                                                 (self.codistrib_region_mean_beta-adj_neg > 0)],n_neg)
                         except:
                             raise ValueError("Less than n_diff_regions regions with high enough probability methylation to be lowered by adjust_factor without going below 0% methylated. Likely adjust_factor is or n_diff_regions is too high.")
                 adjust_factors[np.isin(self.codistrib_regions,diff_regions_up)] = adj_pos
@@ -413,7 +473,6 @@ class pyMethObj():
             
         if any(adjust_factors != 0):
             mu=mu+adjust_factors
-            mu=mu.clip(upper=1)
             a = mu*(1-phi)/phi
             b = (1-mu)*(1-phi)/phi
         else:
@@ -466,7 +525,6 @@ class pyMethObj():
             
         if any(adjust_factors != 0):
             mu=mu+adjust_factors
-            mu=mu.clip(upper=1)
             a = mu*(1-phi)/phi
             b = (1-mu)*(1-phi)/phi
         else:
@@ -478,7 +536,7 @@ class pyMethObj():
             raise ValueError("Parameters are not compatible with the beta binomial model. Likely adjust_factor is too high or something went wrong during fitting.")
         return meth, coverage
 
-    def bbseq(self,site_names:np.ndarray=np.array([]),dmrs: bool=True,min_cpgs: int=3,ncpu: int=1):
+    def bbseq(self,site_names:np.ndarray=np.array([]),dmrs: bool=True,min_cpgs: int=3,ncpu: int=1,maxiter=200,maxfev=300,chunksize=1):
         """
         Perform differential methylation analysis using beta binomial regression, with an option to compute differentially methylated regions of contigous cpgs whose
         mean and association with covariates are similar.
@@ -504,46 +562,75 @@ class pyMethObj():
     
         if ncpu > 1:
             ray.init(num_cpus=ncpu)
+
+            # fits_id=ray.put(self.fits)
+            min_cpgs=ray.put(min_cpgs)
+            param_names_abd=ray.put(self.param_names_abd)
+            param_names_abd=ray.put(self.param_names_abd)
+            maxiter=ray.put(maxiter)
+            maxfev=ray.put(maxfev)
         
             if dmrs:
-
-                fits_id=ray.put(self.fits)
-                site_names_id=ray.put(site_names)
                 region_id=ray.put(self.target_regions)
-                cpg_res,region_res = zip(*ray.get([self.corncob_region.remote(region,region_id,fits_id,min_cpgs) for region in self.individual_regions]))
+                if chunksize > 1:
+                    cpg_res,region_res=zip(*[zip(*ray.get([self.corncob_region.remote(region,region_id,fits_id,min_cpgs,param_names_abd,param_names_disp,
+                                                                         maxiter,maxfev) for region in self.individual_regions[chunk:chunk+chunksize]])) for chunk in range(0,len(set(self.individual_regions))+1,chunksize)])
+                    cpg_res = list(chain.from_iterable(cpg_res))
+                    region_res = list(chain.from_iterable(region_res))
+                    
+                else:
+                    cpg_res,region_res = zip(*ray.get([self.corncob_region.remote(region,self.fits[self.target_regions==region],min_cpgs,param_names_abd,param_names_disp,
+                                                                         maxiter,maxfev) for region in self.individual_regions]))
                 ray.shutdown()
-                self.cpg_res = pd.concat(cpg_res)
-                self.region_res = pd.concat(region_res)
+                
+                cpg_res = pd.DataFrame(np.vstack(cpg_res))
+                cpg_res.index = np.hstack([self.param_names_abd]*int(cpg_res.shape[0]/self.n_param_abd)) 
+                cpg_res.columns = ['Estimate','se','t','p']
+                cpg_res["site"] = np.repeat(site_names, self.n_param_abd)
+                region_res = pd.DataFrame(np.vstack([arr for arr in region_res if isinstance(arr, np.ndarray)]))
+                region_res.index = np.repeat(self.param_names_abd, region_res.shape[0]/self.n_param_abd)
+                region_res.columns = ['Estimate','se','t','p', 'region', 'site', 'start', 'end']
+                region_res["range"] = [range(start,end+1) for start,end in zip(region_res["start"].astype(int),region_res["end"].astype(int))]
+
+                self.cpg_res = cpg_res
+                self.region_res = region_res
                 tmp=self.region_res[~self.region_res["site"].duplicated()]
                 self.codistrib_regions = np.array([tmp[tmp["region"]==str(region)]["site"].iloc[next((i for i, sublist in enumerate(tmp[tmp["region"]==str(region)]["range"]) if pos in sublist ), -1)]
                  if any(int(pos) in reg for reg in tmp[tmp["region"]==str(region)]["range"]) else site_names[cpg] for pos,cpg,region in zip(self.region_cpg_indices,range(self.ncpgs), self.target_regions)])
         
             else:
-                cpg_res = ray.get([self.corncob_cpg.remote(fits[cpg],site_names[cpg]) for cpg in range(meth.shape[0])]) 
+                cpg_res = ray.get([self.corncob_cpg.remote(cpg,fits_id,site_names_id) for cpg in range(self.ncpgs)]) 
                 ray.shutdown()
-                cpg_res = pd.concat(cpg_res)
-                if len(cometh) > 0:
-                    cpg_res = cpg_res.sort_values('site')
-                    cpg_res["site"] = np.repeat(self.unique(cometh),covs.shape[1])
-                self.cpg_res = cpg_res
+                self.cpg_res = pd.concat(cpg_res)
     
         else:
             
             if dmrs:
-                cpg_res,region_res = zip(*[self.corncob_region_local(region,self.fits[self.target_regions==region],min_cpgs) for region in self.individual_regions])
-                self.cpg_res = pd.concat(cpg_res)
-                self.region_res = pd.concat(region_res)
+                if chunksize > 1:
+                    cpg_res,region_res=zip(*[self.corncob_chunk_local(self.individual_regions[chunk:chunk+chunksize],self.target_regions,self.fits,min_cpgs,self.param_names_abd,self.param_names_disp,maxiter,maxfev) 
+                              for chunk in range(0,len(set(self.individual_regions))+1,chunksize)])
+                else:
+                    cpg_res,region_res = zip(*[self.corncob_region_local(region,self.fits[self.target_regions==region],self.X,self.X_star,min_cpgs,self.param_names_abd,self.param_names_disp,
+                                                                         maxiter,maxfev) for region in self.individual_regions])
+                    
+                cpg_res = pd.DataFrame(np.vstack(cpg_res))
+                cpg_res.index = np.hstack([self.param_names_abd]*int(cpg_res.shape[0]/self.n_param_abd)) 
+                cpg_res.columns = ['Estimate','se','t','p']
+                cpg_res["site"] = np.repeat(site_names, self.n_param_abd)
+                region_res = pd.DataFrame(np.vstack([arr for arr in region_res if isinstance(arr, np.ndarray)]))
+                region_res.index = np.repeat(self.param_names_abd, region_res.shape[0]/self.n_param_abd)
+                region_res.columns = ['Estimate','se','t','p', 'region', 'site', 'start', 'end']
+                region_res["range"] = [range(start,end+1) for start,end in zip(region_res["start"].astype(int),region_res["end"].astype(int))]
+                
+                self.cpg_res = cpg_res
+                self.region_res = region_res
                 tmp=self.region_res[~self.region_res["site"].duplicated()]
                 self.codistrib_regions = np.array([tmp[tmp["region"]==str(region)]["site"].iloc[next((i for i, sublist in enumerate(tmp[tmp["region"]==str(region)]["range"]) if pos in sublist ), -1)]
                  if any(int(pos) in reg for reg in tmp[tmp["region"]==str(region)]["range"]) else site_names[cpg] for pos,cpg,region in zip(self.region_cpg_indices,range(self.ncpgs), self.target_regions)])
         
             else:
-                cpg_res = [self.corncob_cpg_local(fits[cpg],site_names[cpg]) for cpg in range(meth.shape[0])]
-                cpg_res = pd.concat(cpg_res)
-                if len(cometh) > 0:
-                    cpg_res = cpg_res.sort_values('site')
-                    cpg_res["site"] = np.repeat(self.unique(cometh),covs.shape[1])
-                self.cpg_res = cpg_res
+                cpg_res = [self.corncob_cpg_local(self.fits[cpg],site_names[cpg]) for cpg in range(self.ncpgs)]
+                self.cpg_res = pd.concat(cpg_res)
 
     def get_contrast(self,res: str="cpg",contrast: str="intercept",alpha=0.05,padj_method="fdr_bh"):
         """
@@ -570,7 +657,53 @@ class pyMethObj():
         return res
 
     @staticmethod
-    def corncob_region_local(region,fits,min_cpgs=3):
+    @ray.remote
+    def corncob_chunk(chunk_regions,region_id,fits_id,min_cpgs=3,param_names_abd=["intercept"],param_names_disp=["intercept"],maxiter=500,maxfev=500):
+        """
+        Fit beta binomial model to a chunk of target regions from DNA methylation data.
+    
+        Parameters:
+            chunk_regions (numpy array): Array of region assignments for this chunk.
+            meth_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of methylated reads at each cpg (rows) for each sample (columns).
+            coverage_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of total reads at each cpg (rows) for each sample (columns).
+            region_id (ray ID): ID of global value produced by ray.put(), pointing to a global array of cpg region assignments.
+            maxiter (integer, default: 250): Maxinum number of iterations when fitting beta binomial model to a cpg (see numpy minimize).
+            maxfev (integer, default: 250): Maxinum number of evaluations when fitting beta binomial model to a cpg (see numpy minimize).
+            
+        Returns:
+            numpy array: Array of optimisation results of length equal to the number of cpgs in this chunk. 
+        """
+        # fits = 
+        cpg_res,region_res = zip(*[corncob_region_local(region,fits_id[np.isin(region_id, chunk_regions)],min_cpgs,param_names_abd,param_names_disp,maxiter,maxfev) 
+                        for region in chunk_regions])
+        cpg_res = pd.concat(cpg_res)
+        region_res = pd.concat(region_res)
+        return cpg_res,region_res
+
+    @staticmethod
+    def corncob_chunk_local(chunk_regions,region_id,fits_id,min_cpgs=3,param_names_abd=["intercept"],param_names_disp=["intercept"],maxiter=500,maxfev=500):
+        """
+        Fit beta binomial model to a chunk of target regions from DNA methylation data.
+    
+        Parameters:
+            chunk_regions (numpy array): Array of region assignments for this chunk.
+            meth_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of methylated reads at each cpg (rows) for each sample (columns).
+            coverage_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of total reads at each cpg (rows) for each sample (columns).
+            region_id (ray ID): ID of global value produced by ray.put(), pointing to a global array of cpg region assignments.
+            maxiter (integer, default: 250): Maxinum number of iterations when fitting beta binomial model to a cpg (see numpy minimize).
+            maxfev (integer, default: 250): Maxinum number of evaluations when fitting beta binomial model to a cpg (see numpy minimize).
+            
+        Returns:
+            numpy array: Array of optimisation results of length equal to the number of cpgs in this chunk. 
+        """
+        cpg_res,region_res = zip(*[corncob_region_local(region,fits_id[region_id==region],min_cpgs,param_names_abd,param_names_disp,maxiter,maxfev) 
+                        for region in chunk_regions])
+        cpg_res = pd.concat(cpg_res)
+        region_res = pd.concat(region_res)
+        return cpg_res,region_res
+
+    @staticmethod
+    def corncob_region_local(region,fits,X,X_star,min_cpgs=3,param_names_abd=["intercept"],param_names_disp=["intercept"],maxiter=500,maxfev=500):
         """
         Perform differential methylation analysis on a single target region using beta binomial regression, with an option to compute differentially methylated regions of contigous cpgs whose
         mean and association with covariates are similar.
@@ -583,73 +716,106 @@ class pyMethObj():
         Returns:
             pandas dataframe(s): Dataframe containing estimates of coeficents for each covariate for each cpg, with a seperate dataframe for region results if dmrs=True. 
         """
-    
         start=0
         end=2
-        current_region=1
         region_res=[]
-        res_1 = fits[start].waltdt()[0]
-        cpg_res = [res_1] #Add individual cpg res to cpg result table
-        X_c = pd.concat([fits[start].X,fits[start].X,fits[start].X]) 
-        X_star_c = pd.concat([fits[start].X_star,fits[start].X_star,fits[start].X_star]) 
-        X_c.index = range(X_c.shape[0])
-        X_star_c.index = range(X_star_c.shape[0])
+        cpg_res=[]
+        n_params_abd=fits[start].X.shape[1]
+        n_params_disp=fits[start].X_star.shape[1]
+        n_samples = fits[start].X.shape[0]
+        n_params=n_params_abd+n_params_disp
+        bad_cpgs=0
+        
+        while fits[start].LogLike > 0: #Check start cpg is well fitted
+            null_df = np.empty((n_params_abd,4,))
+            null_df[:] = np.nan
+            cpg_res += [null_df]
+            start+=1
+            end+=1
+            if start > len(fits)-1:
+                region_res = None
+                cpg_res = np.vstack(cpg_res)
+                return cpg_res,region_res
+            
+        cpg_res += [fits[start].waltdt()[0]] #Add individual cpg res to cpg result table
+        ll_s = fits[start].LogLike 
         
         while end < len(fits)+1:
 
-            coord = np.s_[start:end] # Combined region to be tested
+            if fits[start].LogLike < 0: #Check start cpg is well fitted
 
-            res_2 = fits[end-1].waltdt()[0]
-            cpg_res += [res_2] #Add individual cpg res to cpg result table
-            
-            if start+min_cpgs < len(fits)+1:
-                ll_c = corncob_cpg_local("",np.hstack([fit.count for fit in fits[start:max(start+min_cpgs,end)]]),
-                                             np.hstack([fit.total for fit in fits[start:max(start+min_cpgs,end)]]),X_c,X_star_c,region,LL=True,res=False)
-                ll_s = np.array([fits[cpg].LogLike for cpg in range(start,max(start+min_cpgs,end))]).sum()
-                
-                bic_c = -2 * ll_c + ((fits[start].X.shape[1]+fits[start].X_star.shape[1])) * np.log(fits[start].X.shape[0]) 
-                bic_s = -2 * (ll_s) + ((fits[start].X.shape[1]+fits[start].X_star.shape[1])*(max(start+min_cpgs,end)-start)) * np.log(fits[start].X.shape[0]) 
-                end += 1
-    
-                #If sites come from the same distribution, keep extending the region
-                if bic_c < bic_s:
-                    ll_1=ll_c
-                    previous_coord=coord
-                    if end-start>=min_cpgs+1:
-                        X_c = pd.concat([X_c,fits[start].X]) 
-                        X_star_c = pd.concat([X_star_c,fits[start].X_star]) 
-                        X_c.index = range(X_c.shape[0])
-                        X_star_c.index = range(X_star_c.shape[0])
+                if fits[end-1].LogLike < 0: #Check end cpg is well fitted
+
+                    cpg_res += [fits[end-1].waltdt()[0]] #Add individual cpg res to cpg result table
                     
-                else: # Else start a new region
-                    if (end-start) > min_cpgs+1: #Save region if number of cpgs > min_cpgs
-                        current_region+=1
-                        region_res+=[corncob_cpg_local(f'{start}-{end-3}',np.vstack([fit.count for fit in fits[start:end-2]]).sum(axis=0),np.vstack([fit.total for fit in fits[start:end-2]]).sum(axis=0),
-                                                       fits[start].X,fits[start].X_star,region)] #Add regions results to results table
-                    start=end-2
-                    X_c = pd.concat([fits[start].X,fits[start].X,fits[start].X]) 
-                    X_star_c = pd.concat([fits[start].X_star,fits[start].X_star,fits[start].X_star]) 
-                    X_c.index = range(X_c.shape[0])
-                    X_star_c.index = range(X_star_c.shape[0])
+                    if start+min_cpgs < len(fits)+1: #Can we form a codistrib region
+                
+                        cc_theta=np.vstack([fits[start].theta,fits[end-1].theta]).mean(axis=0) #Estimate of joint parameters
+                        ll_c = beta_binomial_log_likelihood(np.hstack([fits[start].count,fits[end-1].count]),np.hstack([fits[start].total,fits[end-1].total]),
+                                                            np.vstack([fits[start].X,fits[end-1].X]),np.vstack([fits[start].X_star,fits[end-1].X_star]),
+                                                            fits[start].theta,n_params_abd,n_params_disp)
+                        
+                        ll_s = np.array([fits[start].LogLike,fits[end-1].LogLike]).sum()
+                        n_samples=fits[start].X.shape[0]+fits[end-1].X.shape[0]
+                        bic_c = -2 * ll_c + (n_params) * np.log(n_samples) 
+                        bic_s = -2 * ll_s + (n_params*2) * np.log(n_samples) 
+                        
+                        end += 1
+            
+                        #If sites come from the same distribution, keep extending the region
+                        if bic_c < bic_s:
+                            ll_s=ll_c
+
+                        else: # Else start a new region
+                            if (end-start) > min_cpgs+1: #Save region if number of cpgs > min_cpgs
+                                cc_theta=np.vstack([fits[cpg].theta for cpg in range(start,end-2)]).mean(axis=0) #Estimate of joint parameters
+                                region_res+=[corncob_cpg_local(f'{start}-{end-3}',np.vstack([fit.meth for fit in fits[start:end-2]]).sum(axis=0),np.vstack([fit.coverage for fit in fits[start:end-2]]).sum(axis=0),
+                                                               X=X,X_star=X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)] #Add regions results to results table
+                            start=end-2
+
+                    else:
+                        end += 1
+                            
+                else: # Else continue unless two bad in a row, then start a new region
+                    bad_cpgs+=1
+                    null_df = np.empty((n_params_abd,4,))
+                    null_df[:] = np.nan
+                    cpg_res += [null_df]
+                    end+=1
+                    if bad_cpgs == 2:
+                        if (end-start) >= min_cpgs+bad_cpgs: #Save region if number of cpgs > min_cpgs
+                            cc_theta=np.vstack([fits[cpg].theta for cpg in range(start,end-bad_cpgs)]).mean(axis=0) #Estimate of joint parameters
+                            region_res+=[corncob_cpg_local(f'{start}-{end-3}',np.vstack([fit.meth for fit in fits[start:end-bad_cpgs]]).sum(axis=0),np.vstack([fit.coverage for fit in fits[start:end-bad_cpgs]]).sum(axis=0),
+                                                           X=X,X_star=X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)] #Add regions results to results table
+                        start=end-2
+                        end=start+2
+                        bad_cpgs=0
 
             else:
-                end += 1
+                null_df = np.empty((n_params_abd,4,))
+                null_df[:] = np.nan
+                cpg_res += [null_df]
+                start+=1
+                end=start+2
+           
     
         if (end-start) > min_cpgs+1: #Save final region if number of cpgs > min_cpgs
-            region_res+=[corncob_cpg_local(f'{start}-{end}',np.vstack([fit.count for fit in fits[start:end]]).sum(axis=0),np.vstack([fit.total for fit in fits[start:end]]).sum(axis=0),
-                                           fits[start].X,fits[start].X_star,region)]
+            region_res+=[corncob_cpg_local(f'{start}-{end}',np.vstack([fit.meth for fit in fits[start:end]]).sum(axis=0),np.vstack([fit.coverage for fit in fits[start:end]]).sum(axis=0),
+                                           X=X,X_star=X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)]
     
-        cpg_res = pd.concat(cpg_res)
+        cpg_res = np.vstack(cpg_res)
+        # cpg_res = np.hstack([cpg_res, np.tile(np.repeat(range(0,int(cpg_res.shape[0]/3)),3),(1,1)).T])
+        # cpg_res = np.hstack([cpg_res, np.tile(f"{region}",(cpg_res.shape[0],1))])
         if not region_res:
             region_res = None
         else:
-            region_res = pd.concat(region_res)
+            region_res = np.vstack(region_res)
             
         return cpg_res,region_res
 
     @staticmethod
     @ray.remote
-    def corncob_region(region,region_id,fits_id,min_cpgs=3):
+    def corncob_region(region,fits,min_cpgs=3,param_names_abd=["intercept"],param_names_disp=["intercept"],maxiter=500,maxfev=500):
         """
         Perform differential methylation analysis on a single target region using beta binomial regression, with an option to compute differentially methylated regions of contigous cpgs whose
         mean and association with covariates are similar.
@@ -664,73 +830,107 @@ class pyMethObj():
             pandas dataframe(s): Dataframe containing estimates of coeficents for each covariate for each cpg in a region, with a seperate dataframe for region results if dmrs=True. 
         """
     
-        fits=fits_id[region_id==region]
+        # fits=fits_id[region_id==region]
     
         start=0
         end=2
-        current_region=1
         region_res=[]
-        res_1 = fits[start].waltdt()[0]
-        cpg_res = [res_1] #Add individual cpg res to cpg result table
-        X_c = pd.concat([fits[start].X,fits[start].X,fits[start].X]) 
-        X_star_c = pd.concat([fits[start].X_star,fits[start].X_star,fits[start].X_star]) 
-        X_c.index = range(X_c.shape[0])
-        X_star_c.index = range(X_star_c.shape[0])
+        cpg_res=[]
+        n_params_abd=fits[start].X.shape[1]
+        n_params_disp=fits[start].X_star.shape[1]
+        n_samples = fits[start].X.shape[0]
+        n_params=n_params_abd+n_params_disp
+        bad_cpgs=0
+        
+        while fits[start].LogLike > 0: #Check start cpg is well fitted
+            null_df = np.empty((n_params_abd,4,))
+            null_df[:] = np.nan
+            cpg_res += [null_df]
+            start+=1
+            end+=1
+            if start > len(fits)-1:
+                region_res = None
+                cpg_res = np.vstack(cpg_res)
+                return cpg_res,region_res
+            
+        cpg_res += [fits[start].waltdt()[0]] #Add individual cpg res to cpg result table
+        ll_s = fits[start].LogLike 
         
         while end < len(fits)+1:
 
-            coord = np.s_[start:end] # Combined region to be tested
+            if fits[start].LogLike < 0: #Check start cpg is well fitted
 
-            res_2 = fits[end-1].waltdt()[0]
-            cpg_res += [res_2] #Add individual cpg res to cpg result table
-            
-            if start+min_cpgs < len(fits)+1:
-                ll_c = corncob_cpg_local("",np.hstack([fit.count for fit in fits[start:max(start+min_cpgs,end)]]),
-                                             np.hstack([fit.total for fit in fits[start:max(start+min_cpgs,end)]]),X_c,X_star_c,region,LL=True,res=False)
-                ll_s = np.array([fits[cpg].LogLike for cpg in range(start,max(start+min_cpgs,end))]).sum()
-                
-                bic_c = -2 * ll_c + ((fits[start].X.shape[1]+fits[start].X_star.shape[1])) * np.log(fits[start].X.shape[0]) 
-                bic_s = -2 * (ll_s) + ((fits[start].X.shape[1]+fits[start].X_star.shape[1])*(max(start+min_cpgs,end)-start)) * np.log(fits[start].X.shape[0]) 
-                end += 1
-    
-                #If sites come from the same distribution, keep extending the region
-                if bic_c < bic_s:
-                    ll_1=ll_c
-                    previous_coord=coord
-                    if end-start>=min_cpgs+1:
-                        X_c = pd.concat([X_c,fits[start].X]) 
-                        X_star_c = pd.concat([X_star_c,fits[start].X_star]) 
-                        X_c.index = range(X_c.shape[0])
-                        X_star_c.index = range(X_star_c.shape[0])
+                if fits[end-1].LogLike < 0: #Check end cpg is well fitted
+
+                    cpg_res += [fits[end-1].waltdt()[0]] #Add individual cpg res to cpg result table
                     
-                else: # Else start a new region
-                    if (end-start) > min_cpgs+1: #Save region if number of cpgs > min_cpgs
-                        current_region+=1
-                        region_res+=[corncob_cpg_local(f'{start}-{end-3}',np.vstack([fit.count for fit in fits[start:end-2]]).sum(axis=0),np.vstack([fit.total for fit in fits[start:end-2]]).sum(axis=0),
-                                                       fits[start].X,fits[start].X_star,region)] #Add regions results to results table
-                    start=end-2
-                    X_c = pd.concat([fits[start].X,fits[start].X,fits[start].X]) 
-                    X_star_c = pd.concat([fits[start].X_star,fits[start].X_star,fits[start].X_star]) 
-                    X_c.index = range(X_c.shape[0])
-                    X_star_c.index = range(X_star_c.shape[0])
+                    if start+min_cpgs < len(fits)+1: #Can we form a codistrib region
+                
+                        cc_theta=np.vstack([fits[start].theta,fits[end-1].theta]).mean(axis=0) #Estimate of joint parameters
+                        ll_c = beta_binomial_log_likelihood(np.hstack([fits[start].count,fits[end-1].count]),np.hstack([fits[start].total,fits[end-1].total]),
+                                                            np.vstack([fits[start].X,fits[end-1].X]),np.vstack([fits[start].X_star,fits[end-1].X_star]),
+                                                            fits[start].theta,n_params_abd,n_params_disp)
+                        
+                        ll_s = np.array([fits[start].LogLike,fits[end-1].LogLike]).sum()
+                        n_samples=fits[start].X.shape[0]+fits[end-1].X.shape[0]
+                        bic_c = -2 * ll_c + (n_params) * np.log(n_samples) 
+                        bic_s = -2 * ll_s + (n_params*2) * np.log(n_samples) 
+                        
+                        end += 1
+            
+                        #If sites come from the same distribution, keep extending the region
+                        if bic_c < bic_s:
+                            ll_s=ll_c
+
+                        else: # Else start a new region
+                            if (end-start) > min_cpgs+1: #Save region if number of cpgs > min_cpgs
+                                cc_theta=np.vstack([fits[cpg].theta for cpg in range(start,end-2)]).mean(axis=0) #Estimate of joint parameters
+                                region_res+=[corncob_cpg_local(f'{start}-{end-3}',np.vstack([fit.meth for fit in fits[start:end-2]]).sum(axis=0),np.vstack([fit.coverage for fit in fits[start:end-2]]).sum(axis=0),
+                                                               fits[start].X,fits[start].X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)] #Add regions results to results table
+                            start=end-2
+
+                    else:
+                        end += 1
+                            
+                else: # Else continue unless two bad in a row, then start a new region
+                    bad_cpgs+=1
+                    null_df = np.empty((n_params_abd,4,))
+                    null_df[:] = np.nan
+                    cpg_res += [null_df]
+                    end+=1
+                    if bad_cpgs == 2:
+                        if (end-start) >= min_cpgs+bad_cpgs: #Save region if number of cpgs > min_cpgs
+                            cc_theta=np.vstack([fits[cpg].theta for cpg in range(start,end-bad_cpgs)]).mean(axis=0) #Estimate of joint parameters
+                            region_res+=[corncob_cpg_local(f'{start}-{end-3}',np.vstack([fit.meth for fit in fits[start:end-bad_cpgs]]).sum(axis=0),np.vstack([fit.coverage for fit in fits[start:end-bad_cpgs]]).sum(axis=0),
+                                                           fits[start].X,fits[start].X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)] #Add regions results to results table
+                        start=end-2
+                        end=start+2
+                        bad_cpgs=0
 
             else:
-                end += 1
+                null_df = np.empty((n_params_abd,4,))
+                null_df[:] = np.nan
+                cpg_res += [null_df]
+                start+=1
+                end=start+2
+           
     
         if (end-start) > min_cpgs+1: #Save final region if number of cpgs > min_cpgs
-            region_res+=[corncob_cpg_local(f'{start}-{end}',np.vstack([fit.count for fit in fits[start:end]]).sum(axis=0),np.vstack([fit.total for fit in fits[start:end]]).sum(axis=0),
-                                           fits[start].X,fits[start].X_star,region)]
+            region_res+=[corncob_cpg_local(f'{start}-{end}',np.vstack([fit.meth for fit in fits[start:end]]).sum(axis=0),np.vstack([fit.coverage for fit in fits[start:end]]).sum(axis=0),
+                                           X=fits[start].X,X_star=fits[start].X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)]
     
-        cpg_res = pd.concat(cpg_res)
+        cpg_res = np.vstack(cpg_res)
+        # cpg_res = np.hstack([cpg_res, np.tile(np.repeat(range(0,int(cpg_res.shape[0]/3)),3),(1,1)).T])
+        # cpg_res = np.hstack([cpg_res, np.tile(f"{region}",(cpg_res.shape[0],1))])
         if not region_res:
             region_res = None
         else:
-            region_res = pd.concat(region_res)
+            region_res = np.vstack(region_res)
             
         return cpg_res,region_res
 
     @ray.remote
-    def corncob_cpg(fit,site):
+    def corncob_cpg(cpg,fits_id,site_names_id):
         """
         Perform differential methylation analysis on a single cpg using beta binomial regression.
     
@@ -741,8 +941,8 @@ class pyMethObj():
         Returns:
             pandas dataframe: Dataframe containing estimates of coeficents for the cpg. 
         """
-        res = fit.waltdt()[0]
-        res["site"] = f'{site}'
+        res = fits_id[cpg].waltdt()[0]
+        res["site"] = f'{site_names_id[cpg]}'
         return res
 
     @staticmethod
@@ -799,9 +999,9 @@ class pyMethObj():
 
         if show_codistrib_regions:
             assert len(self.codistrib_regions) == self.ncpgs, "Run bbseq before simulating if codistrib_regions=True"
-            region_colours=["lightgrey","#5bd7f0", "lightgreen","#f0e15b", "#f0995b", "#db6b6b", "#cd5bf0"]
-            codistrib_regions = self.codistrib_regions[self.target_regions == region]
             unique_codistrib_regions = self.unique([x for x in self.codistrib_regions[self.target_regions == region] if "_" in x])
+            region_colours=["lightgrey","#5bd7f0", "lightgreen","#f0e15b", "#f0995b", "#db6b6b", "#cd5bf0", "#34b1eb", "#9934eb"] + [f"#{random.randrange(0x1000000):06x}" for _ in range(max(0,len(unique_codistrib_regions)-9))]
+            codistrib_regions = self.codistrib_regions[self.target_regions == region]
             cdict = {x: region_colours[i] for i,x in enumerate(unique_codistrib_regions)}
             region_plot["region"] = [cdict[x] if "_" in x else None for x in codistrib_regions]
         if show_codistrib_regions:  

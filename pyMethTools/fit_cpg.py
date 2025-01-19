@@ -10,6 +10,7 @@ from scipy.optimize._numdiff import approx_derivative
 from scipy.special import logit,expit, digamma, polygamma
 import ray
 import warnings
+from pyMethTools import bbll
 
 class Corncob_2():
     """
@@ -20,28 +21,30 @@ class Corncob_2():
         These must be in the same length and orientation as covariates
         
     """
-    def __init__(self, total, count, X=None, X_star=None, phi_init=0.5):
+    def __init__(self, total, count, X=None, X_star=None, phi_init=0.5,param_names_abd=["intercept"],param_names_disp=["intercept"]):
         # Assertions here TODO
-        
-        self.total = total
-        self.count = count
-        self.X = X
-        self.X_star = X_star
-        self.n_param_abd = len(X.columns)
-        self.n_param_disp = len(X_star.columns)
-        self.n_ppar = len(X.columns) + len(X_star.columns)
+
+        self.meth = total
+        self.coverage = count
+        self.total = total[~np.isnan(total)]
+        self.count = count[~np.isnan(total)]
+        self.X = X[~np.isnan(total)]
+        self.X_star = X_star[~np.isnan(total)]
+        self.n_param_abd = X.shape[1]
+        self.n_param_disp = X_star.shape[1]
+        self.n_ppar = self.n_param_abd + self.n_param_disp
         self.df_model = self.n_ppar
-        self.df_residual = len(X) - self.df_model
+        self.df_residual = self.X.shape[0] - self.df_model
         
         if (self.df_residual) < 0:
             raise ValueError("Model overspecified. Trying to fit more parameters than sample size.")
         
-        self.param_names_abd = X.columns
-        self.param_names_disp = X_star.columns
+        self.param_names_abd = param_names_abd
+        self.param_names_disp = param_names_disp
         self.phi_init = phi_init
         
         # Inits
-        self.start_params = None
+        self.start_params = []
         # Final params set to none until fit
         self.theta = None
         self.params_abd = None
@@ -66,6 +69,10 @@ class Corncob_2():
             list(m.params) + ([logit(self.phi_init)] * self.n_param_disp)
         )
 
+    @staticmethod
+    def objective(beta, X, X_star, count, total, n_param_abd, n_param_disp):
+        return bbll.bbll(beta, X, X_star, count, total, n_param_abd, n_param_disp)
+
     # Define the log-likelihood for beta-binomial regression (simplified version)
     def beta_binomial_log_likelihood(self, beta):
         """
@@ -77,27 +84,26 @@ class Corncob_2():
         Returns:
             float: Negative log-likelihood.
         """
-        mu_wlink = np.matmul(
-                self.X,
-                beta[:self.n_param_abd]
-            )
-        phi_wlink = np.matmul(
-                self.X_star,
-                beta[-1*self.n_param_disp:]
-            )
+        # Compute linear predictors
+        mu_wlink = self.X @ beta[:self.n_param_abd]
+        phi_wlink = self.X_star @ beta[-self.n_param_disp:]
+    
+        # Transform to scale (0, 1)
         mu = expit(mu_wlink)
-        phi = expit(phi_wlink) 
+        phi = expit(phi_wlink)
     
-        a = mu*(1-phi)/phi
-        b = (1-mu)*(1-phi)/phi
-        LL = stats.betabinom.logpmf(
-                k=self.count,
-                n=self.total,
-                a=a,
-                b=b
-            )
+        # Precompute shared terms
+        phi_inv = (1 - phi) / phi
+        a = mu * phi_inv
+        b = (1 - mu) * phi_inv
     
-        return -1*np.sum(LL)  # Negative for minimization
+        # Compute log-likelihood in a vectorized manner
+        LL = stats.betabinom.logpmf(self.count, self.total, a, b)
+        LL = np.sum(LL)
+        # if LL > 0:
+        return -LL  # Negative for minimization
+        # else:
+            # return 100000.0
 
     # Numerical Hessian calculation
     def compute_hessian(self):
@@ -207,20 +213,22 @@ class Corncob_2():
         
         # Calculate SE
         try:
-            # Compute the Hessian numerically at the optimized parameters
-            hessian = self.compute_hessian()
-            # Invert the Hessian to get the variance-covariance matrix
-            covMat = np.linalg.inv(hessian)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                # Compute the Hessian numerically at the optimized parameters
+                hessian = self.compute_hessian()
+                # Invert the Hessian to get the variance-covariance matrix
+                covMat = np.linalg.inv(hessian)
         except np.linalg.LinAlgError:
-            print("Hessian matrix is singular or ill-conditioned. Cannot compute variance-covariance matrix.")
+            # print("Hessian matrix is singular or ill-conditioned. Cannot compute variance-covariance matrix.")
             covMat = np.full_like(hessian, np.nan)  # Fill with NaNs
 
         # Implicit else we could calculate se
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+            warnings.simplefilter('ignore', RuntimeWarning)
             se = np.sqrt(np.diag(covMat))
-        # Tvalues
-        tvalue = self.theta/se
+            # Tvalues
+            tvalue = self.theta/se
         # And pvalues
         pval = stats.t.sf(np.abs(tvalue), self.df_residual)*2
 
@@ -238,13 +246,14 @@ class Corncob_2():
             result_table_disp
         ))
     
-    def fit(self, start_params=None, maxiter=10000, maxfev=5000, method='Nelder-Mead', **kwds):
-        if start_params == None:
+    def fit(self, start_params=[], maxiter=10000, maxfev=5000, method='Nelder-Mead', **kwds):
+        if len(start_params) == 0:
             # Reasonable starting values
             try:
+                warnings.simplefilter('ignore', PerfectSeparationWarning)
                 start_params = self.corncob_init()
             except:
-                start_params = np.repeat(logit(self.phi_init),self.n_param_abd) + ([logit(self.phi_init)] * self.n_param_disp)
+                start_params = np.hstack([np.repeat(logit(self.phi_init),self.n_param_abd), np.repeat(logit(self.phi_init), self.n_param_disp)])
         
         # Fit the model using Nelder-Mead method and scipy minimize
         minimize_res = minimize(
@@ -263,7 +272,43 @@ class Corncob_2():
         
         return minimize_res
 
-def corncob_cpg_local(site,meth,coverage,X,X_star,region=None,res=True,LL=False):
+def fit_cpg_local(meth,coverage,X,X_star,maxiter=500,maxfev=500,start_params=[],param_names_abd=["intercept"],param_names_disp=["intercept"]):
+        """
+        Perform differential methylation analysis on a single cpg using beta binomial regression.
+    
+        Parameters:
+            region (integer, float, or string): Name of the region being analysed.
+            site (integer, float, or string): Name of cpg.
+            meth (2D numpy array): Count table of methylated reads at each cpg in the region (rows) for each sample (columns).
+            coverage (2D numpy array): Count table of total reads at each cpg in the region (rows) for each sample (columns).
+            X (pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the mean parameter, 
+            with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
+            If not supplied will form only an intercept column.
+            X_star (pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion parameter, 
+            with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
+            If not supplied will form only an intercept column.
+            min_cpgs (integer, default: 3): Minimum length of a dmr.
+            res (boolean, default: True): Whether to return regression results.
+            LL (boolean, default: False): Whether to return model log likelihood.
+            
+            
+        Returns:
+            pandas dataframe (optional, depending in res parameter): Dataframe containing estimates of coeficents for the cpg. 
+            float (optional, depending in LL parameter): Model log likelihood
+        """
+        cc = Corncob_2(
+                    total=coverage,
+                    count=meth,
+                    X=X,
+                    X_star=X_star,
+                    param_names_abd=param_names_abd,
+                    param_names_disp=param_names_disp
+                )
+        
+        e_m = cc.fit(maxiter=maxiter,maxfev=maxfev,start_params=start_params)
+        return cc
+
+def corncob_cpg_local(site,meth,coverage,X,X_star,maxiter=500,maxfev=500,region=None,res=True,LL=False,param_names_abd=["intercept"],param_names_disp=["intercept"],start_params=[]):
     """
     Perform differential methylation analysis on a single cpg using beta binomial regression.
 
@@ -291,22 +336,128 @@ def corncob_cpg_local(site,meth,coverage,X,X_star,region=None,res=True,LL=False)
                 total=coverage,
                 count=meth,
                 X=X,
-                X_star=X_star
+                X_star=X_star,
+                param_names_abd=param_names_abd,
+                param_names_disp=param_names_disp
             )
     
-    e_m = cc.fit()
+    e_m = cc.fit(maxiter=maxiter,maxfev=maxfev,start_params=start_params)
     if res:
-        res = cc.waltdt()[0]
-        if region != None:
-            res["site"] = f'{region}_{site}'
-            res["region"] = f'{region}'
-            site=site.split("-")
-            res["range"] = [range(int(site[0]),int(site[1])+1) for _ in range(res.shape[0])]
+        if cc.LogLike < 0:
+            res = cc.waltdt()[0].to_numpy()
         else:
-            res["site"] = site
+            res = np.empty((X.shape[1],4,))
+            res[:] = np.nan
+            
+        if region != None:
+            site_range=site.split("-")
+            res = np.hstack([res, np.tile(f'{region}',(res.shape[0],1)), np.tile(f'{region}_{site}',(res.shape[0],1)), 
+                             np.tile(int(site_range[0]),(res.shape[0],1)), np.tile(int(site_range[1])+1,(res.shape[0],1))])
         if LL:
             return res,-e_m.fun
         else: 
             return res
     else:
         return -e_m.fun
+
+def corncob_region_local(region,fits,min_cpgs=3,param_names_abd=["intercept"],param_names_disp=["intercept"],maxiter=500,maxfev=500):
+        """
+        Perform differential methylation analysis on a single target region using beta binomial regression, with an option to compute differentially methylated regions of contigous cpgs whose
+        mean and association with covariates are similar.
+    
+        Parameters:
+            region (integer, float, or string): Name of the region being analysed.
+            fits (1D numpy array): Array containing bb fits (corcon_2 object) for all cpgs in the region.
+            min_cpgs (integer, default: 3): Minimum length of a dmr.
+            
+        Returns:
+            pandas dataframe(s): Dataframe containing estimates of coeficents for each covariate for each cpg, with a seperate dataframe for region results if dmrs=True. 
+        """
+        start=0
+        end=2
+        region_res=[]
+        cpg_res = [fits[start].waltdt()[0]] #Add individual cpg res to cpg result table
+        X_c = np.concatenate([fits[start].X,fits[start].X]) 
+        X_star_c = np.concatenate([fits[start].X_star,fits[start].X_star]) 
+
+        n_params_abd=fits[start].X.shape[1]
+        n_params_disp=fits[start].X_star.shape[1]
+        n_samples = fits[start].X.shape[0]
+        n_params=n_params_abd+n_params_disp
+
+        ll_s = fits[start].LogLike 
+        
+        while end < len(fits)+1:
+
+            cpg_res += [fits[end-1].waltdt()[0]] #Add individual cpg res to cpg result table
+            
+            if start+min_cpgs < len(fits)+1: #Can we form a codistrib region
+                
+                cc_theta=np.vstack([fits[cpg].theta for cpg in range(start,end)]).mean(axis=0) #Estimate of joint parameters
+                ll_c = corncob_cpg_local("",np.hstack([fit.count for fit in fits[start:end]]),
+                                         np.hstack([fit.total for fit in fits[start:end]]),X_c,X_star_c,maxiter=maxiter,maxfev=maxfev,region=region,LL=True,res=False,
+                                     param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta) 
+                ll_s = ll_s + fits[end-1].LogLike
+            
+                bic_c = -2 * ll_c + (n_params) * np.log(n_samples) 
+                bic_s = -2 * ll_s + (n_params*2) * np.log(n_samples) 
+                
+                end += 1
+    
+                #If sites come from the same distribution, keep extending the region
+                if bic_c < bic_s:
+                    ll_s=ll_c
+                    X_c = np.concatenate([X_c,fits[start].X]) 
+                    X_star_c = np.concatenate([X_star_c,fits[start].X_star]) 
+
+                else: # Else start a new region
+                    if (end-start) > min_cpgs+1: #Save region if number of cpgs > min_cpgs
+                        cc_theta=np.vstack([fits[cpg].theta for cpg in range(start,end-2)]).mean(axis=0) #Estimate of joint parameters
+                        region_res+=[corncob_cpg_local(f'{start}-{end-3}',np.vstack([fit.count for fit in fits[start:end-2]]).sum(axis=0),np.vstack([fit.total for fit in fits[start:end-2]]).sum(axis=0),
+                                                       fits[start].X,fits[start].X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)] #Add regions results to results table
+                    start=end-2
+                    X_c = np.concatenate([fits[start].X,fits[start].X]) 
+                    X_star_c = np.concatenate([fits[start].X_star,fits[start].X_star]) 
+                    ll_s = fits[start].LogLike 
+
+            else:
+                end += 1
+    
+        if (end-start) > min_cpgs+1: #Save final region if number of cpgs > min_cpgs
+            region_res+=[corncob_cpg_local(f'{start}-{end-2}',np.vstack([fit.count for fit in fits[start:end]]).sum(axis=0),np.vstack([fit.total for fit in fits[start:end]]).sum(axis=0),
+                                           X=fits[start].X,X_star=fits[start].X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)]
+    
+        cpg_res = pd.concat(cpg_res)
+        if not region_res:
+            region_res = None
+        else:
+            region_res = pd.concat(region_res)
+            
+        return cpg_res,region_res
+
+def beta_binomial_log_likelihood(count,total,X,X_star,beta,n_param_abd,n_param_disp):
+        """
+        Compute the negative log-likelihood for beta-binomial regression.
+    
+        Parameters:
+            beta (numpy array): Coefficients to estimate (p-dimensional vector).
+            
+        Returns:
+            float: Negative log-likelihood.
+        """
+        # Compute linear predictors
+        mu_wlink = X @ beta[:n_param_abd]
+        phi_wlink = X_star @ beta[-n_param_disp:]
+    
+        # Transform to scale (0, 1)
+        mu = expit(mu_wlink)
+        phi = expit(phi_wlink)
+    
+        # Precompute shared terms
+        phi_inv = (1 - phi) / phi
+        a = mu * phi_inv
+        b = (1 - mu) * phi_inv
+    
+        # Compute log-likelihood in a vectorized manner
+        LL = stats.betabinom.logpmf(count, total, a, b)
+        return np.sum(LL) 
