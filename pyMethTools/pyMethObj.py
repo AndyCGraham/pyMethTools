@@ -117,7 +117,7 @@ class pyMethObj():
         self.region_cov_sd = []
         self.disp_intercept = []
 
-    def fit_betabinom(self,chunksize: int=1,ncpu: int=1,start_params=[],maxiter: int=500, maxfev: int=500):
+    def fit_betabinom(self,chunksize: int=1,ncpu: int=1,start_params=[],maxiter: int=500, maxfev: int=500, link="arcsin"):
         """
         Fit beta binomial model to DNA methylation data.
     
@@ -133,8 +133,10 @@ class pyMethObj():
         assert chunksize>0, "chunksize must be positive integer"
         assert isinstance(ncpu,int), "ncpu must be positive integer"
         assert ncpu>0, "ncpu must be positive integer"
+        assert any([link=="arcsin",link=="logit"]), "link must be 'arcsin' or 'logit'"
 
         cpgs=np.array(range(self.ncpgs))
+        self.link = link
     
         if ncpu > 1: #Use ray for parallel processing
             ray.init(num_cpus=ncpu)    
@@ -146,10 +148,10 @@ class pyMethObj():
             cpg_id=ray.put(cpgs)
             if chunksize>1:
                 self.fits = ray.get([self.fit_betabinom_chunk.remote(individual_regions[chunk:chunk+chunksize],
-                                                         meth_id,coverage_id,region_id,self.maxiter,self.maxfev) 
+                                                         meth_id,coverage_id,region_id,self.maxiter,self.maxfev,self.link) 
                               for chunk in range(0,len(set(self.individual_regions))+1,chunksize)])
             else:
-                self.fits = ray.get([self.fit_region.remote(cpg_id,region,meth_id,coverage_id,region_id,X_id,X_star_id,maxiter,maxfev,start_params,self.param_names_abd,self.param_names_disp) 
+                self.fits = ray.get([self.fit_region.remote(cpg_id,region,meth_id,coverage_id,region_id,X_id,X_star_id,maxiter,maxfev,start_params,self.param_names_abd,self.param_names_disp,self.link) 
                               for region in self.individual_regions])
 
             ray.shutdown()
@@ -184,7 +186,7 @@ class pyMethObj():
 
     @staticmethod
     @ray.remote
-    def fit_region(cpg_id,region,meth_id,coverage_id,region_id,X_id,X_star_id,maxiter=150,maxfev=150,start_params=[],param_names_abd=["intercept"],param_names_disp=["intercept"]):
+    def fit_region(cpg_id,region,meth_id,coverage_id,region_id,X_id,X_star_id,maxiter=150,maxfev=150,start_params=[],param_names_abd=["intercept"],param_names_disp=["intercept"],link="arcsin"):
         """
         Perform differential methylation analysis on a single cpg using beta binomial regression.
     
@@ -202,7 +204,7 @@ class pyMethObj():
         Returns:
             pandas dataframe: Dataframe containing estimates of coeficents for the cpg. 
         """
-        fits = np.array([fit_cpg_local(meth_id[cpg],coverage_id[cpg],X_id,X_star_id,maxiter,maxfev,start_params,param_names_abd,param_names_disp) 
+        fits = np.array([fit_cpg_local(meth_id[cpg],coverage_id[cpg],X_id,X_star_id,maxiter,maxfev,start_params,param_names_abd,param_names_disp,link) 
                               for cpg in cpg_id[region_id==region]])
         
         return fits
@@ -233,7 +235,7 @@ class pyMethObj():
 
     @staticmethod
     @ray.remote
-    def fit_cpg(cpg,meth,coverage,X,X_star,maxiter=150,maxfev=150,start_params=[],param_names_abd=["intercept"],param_names_disp=["intercept"]):
+    def fit_cpg(cpg,meth,coverage,X,X_star,maxiter=150,maxfev=150,start_params=[],param_names_abd=["intercept"],param_names_disp=["intercept"],link="arcsin"):
         """
         Perform differential methylation analysis on a single cpg using beta binomial regression.
     
@@ -257,7 +259,8 @@ class pyMethObj():
                     X=X,
                     X_star=X_star,
                     param_names_abd=param_names_abd,
-                    param_names_disp=param_names_disp
+                    param_names_disp=param_names_disp,
+                    link=link
                 )
         
         e_m = cc.fit(maxiter=maxiter,maxfev=maxfev,start_params=start_params)
@@ -293,7 +296,8 @@ class pyMethObj():
                     X=self.X,
                     X_star=self.X_star,
                     param_names_abd=self.param_names_abd,
-                    param_names_disp=self.param_names_disp
+                    param_names_disp=self.param_names_disp,
+                    link=self.link
                 )
         
         e_m = cc.fit(maxiter=self.maxiter,maxfev=self.maxfev,start_params=start_params)
@@ -424,17 +428,17 @@ class pyMethObj():
             ray.init(num_cpus=ncpu)    
             sim_meth, sim_coverage = zip(*ray.get([self.sim.remote(np.vstack([fit.theta for fit in self.fits[self.target_regions==region]]),covs,covs_disp,
                                                           read_depth[self.individual_regions==region],vary_read_depth,read_depth_sd[self.individual_regions==region],
-                                                     adjust_factors[self.target_regions==region],sample_size) for region in self.individual_regions]))
+                                                     adjust_factors[self.target_regions==region],sample_size,self.link) for region in self.individual_regions]))
             ray.shutdown()
 
         else:
             sim_meth, sim_coverage = zip(*[self.sim_local(np.vstack([fit.theta for fit in self.fits[self.target_regions==region]]),covs,covs_disp,
                                                           read_depth[self.individual_regions==region],vary_read_depth,read_depth_sd[self.individual_regions==region],
-                                                     adjust_factors[self.target_regions==region],sample_size) for region in self.individual_regions])
+                                                     adjust_factors[self.target_regions==region],sample_size,self.link) for region in self.individual_regions])
         return np.vstack(sim_meth), np.vstack(sim_coverage), adjust_factors
 
     @staticmethod
-    def sim_local(params,X,X_star,read_depth=30,vary_read_depth=True,read_depth_sd=2,adjust_factors=0,sample_size=100):
+    def sim_local(params,X,X_star,read_depth=30,vary_read_depth=True,read_depth_sd=2,adjust_factors=0,sample_size=100,link="arcsin"):
         """
         Simulate new samples based on existing samples, for this region.
     
@@ -449,6 +453,7 @@ class pyMethObj():
             read_depth_sd (float or integer, default: 5): The standard deviation to vary read depth by, using a normal distribution with mean 'read_depth'.
             adjust_factors (1D numpy array, default: 0): Array of the percent methylation each cpg will be altered by in the simulated versus template samples.
             sample_size (integer, default: 100): Number of samples to simulate.
+            link (string, default: "arcsin"): Link function to use, either 'arcsin' or 'logit'.
             
         Returns:
             2D numpy array,2D numpy array: Arrays containing simulated methylated counts, total counts for simulated samples. 
@@ -468,8 +473,12 @@ class pyMethObj():
                 X_star,
                 params[:,-1*X_star.shape[1]:].T
             )
-        mu = expit(mu_wlink)
-        phi = expit(phi_wlink) 
+        if link == "arcsin":
+            mu = np.sin(mu_wlink) ** 2
+            phi = np.sin(phi_wlink) ** 2
+        elif link == "logit":
+            mu = expit(mu_wlink)
+            phi = expit(phi_wlink)
             
         if any(adjust_factors != 0):
             mu=mu+adjust_factors
@@ -486,7 +495,7 @@ class pyMethObj():
 
     @staticmethod
     @ray.remote
-    def sim(params,X,X_star,read_depth=30,vary_read_depth=True,read_depth_sd=2,adjust_factors=0,sample_size=100):
+    def sim(params,X,X_star,read_depth=30,vary_read_depth=True,read_depth_sd=2,adjust_factors=0,sample_size=100,link="arcsin"):
         """
         Simulate new samples based on existing samples, for this region.
     
@@ -520,8 +529,12 @@ class pyMethObj():
                 X_star,
                 params[:,-1*X_star.shape[1]:].T
             )
-        mu = expit(mu_wlink)
-        phi = expit(phi_wlink) 
+        if link == "arcsin":
+            mu = np.sin(mu_wlink) ** 2
+            phi = np.sin(phi_wlink) ** 2
+        elif link == "logit":
+            mu = expit(mu_wlink)
+            phi = expit(phi_wlink)
             
         if any(adjust_factors != 0):
             mu=mu+adjust_factors
@@ -574,13 +587,13 @@ class pyMethObj():
                 region_id=ray.put(self.target_regions)
                 if chunksize > 1:
                     cpg_res,region_res=zip(*[zip(*ray.get([self.corncob_region.remote(region,region_id,fits_id,min_cpgs,param_names_abd,param_names_disp,
-                                                                         maxiter,maxfev) for region in self.individual_regions[chunk:chunk+chunksize]])) for chunk in range(0,len(set(self.individual_regions))+1,chunksize)])
+                                                                         maxiter,maxfev,self.link) for region in self.individual_regions[chunk:chunk+chunksize]])) for chunk in range(0,len(set(self.individual_regions))+1,chunksize)])
                     cpg_res = list(chain.from_iterable(cpg_res))
                     region_res = list(chain.from_iterable(region_res))
                     
                 else:
                     cpg_res,region_res = zip(*ray.get([self.corncob_region.remote(region,self.fits[self.target_regions==region],min_cpgs,param_names_abd,param_names_disp,
-                                                                         maxiter,maxfev) for region in self.individual_regions]))
+                                                                         maxiter,maxfev,self.link) for region in self.individual_regions]))
                 ray.shutdown()
                 
                 cpg_res = pd.DataFrame(np.vstack(cpg_res))
@@ -607,11 +620,11 @@ class pyMethObj():
             
             if dmrs:
                 if chunksize > 1:
-                    cpg_res,region_res=zip(*[self.corncob_chunk_local(self.individual_regions[chunk:chunk+chunksize],self.target_regions,self.fits,min_cpgs,self.param_names_abd,self.param_names_disp,maxiter,maxfev) 
-                              for chunk in range(0,len(set(self.individual_regions))+1,chunksize)])
+                    cpg_res,region_res=zip(*[self.corncob_chunk_local(self.individual_regions[chunk:chunk+chunksize],self.target_regions,self.fits,min_cpgs,self.param_names_abd,self.param_names_disp,
+                                                                      maxiter,maxfev,self.link) for chunk in range(0,len(set(self.individual_regions))+1,chunksize)])
                 else:
                     cpg_res,region_res = zip(*[self.corncob_region_local(region,self.fits[self.target_regions==region],self.X,self.X_star,min_cpgs,self.param_names_abd,self.param_names_disp,
-                                                                         maxiter,maxfev) for region in self.individual_regions])
+                                                                         maxiter,maxfev,self.link) for region in self.individual_regions])
                     
                 cpg_res = pd.DataFrame(np.vstack(cpg_res))
                 cpg_res.index = np.hstack([self.param_names_abd]*int(cpg_res.shape[0]/self.n_param_abd)) 
@@ -658,7 +671,7 @@ class pyMethObj():
 
     @staticmethod
     @ray.remote
-    def corncob_chunk(chunk_regions,region_id,fits_id,min_cpgs=3,param_names_abd=["intercept"],param_names_disp=["intercept"],maxiter=500,maxfev=500):
+    def corncob_chunk(chunk_regions,region_id,fits_id,min_cpgs=3,param_names_abd=["intercept"],param_names_disp=["intercept"],maxiter=500,maxfev=500,link="arcsin"):
         """
         Fit beta binomial model to a chunk of target regions from DNA methylation data.
     
@@ -681,7 +694,7 @@ class pyMethObj():
         return cpg_res,region_res
 
     @staticmethod
-    def corncob_chunk_local(chunk_regions,region_id,fits_id,min_cpgs=3,param_names_abd=["intercept"],param_names_disp=["intercept"],maxiter=500,maxfev=500):
+    def corncob_chunk_local(chunk_regions,region_id,fits_id,min_cpgs=3,param_names_abd=["intercept"],param_names_disp=["intercept"],maxiter=500,maxfev=500,link="arcsin"):
         """
         Fit beta binomial model to a chunk of target regions from DNA methylation data.
     
@@ -703,7 +716,7 @@ class pyMethObj():
         return cpg_res,region_res
 
     @staticmethod
-    def corncob_region_local(region,fits,X,X_star,min_cpgs=3,param_names_abd=["intercept"],param_names_disp=["intercept"],maxiter=500,maxfev=500):
+    def corncob_region_local(region,fits,X,X_star,min_cpgs=3,param_names_abd=["intercept"],param_names_disp=["intercept"],maxiter=500,maxfev=500,link="arcsin"):
         """
         Perform differential methylation analysis on a single target region using beta binomial regression, with an option to compute differentially methylated regions of contigous cpgs whose
         mean and association with covariates are similar.
@@ -725,7 +738,9 @@ class pyMethObj():
         n_samples = fits[start].X.shape[0]
         n_params=n_params_abd+n_params_disp
         bad_cpgs=0
-            
+        X_c=fits[start].X
+        X_star_c=fits[start].X_star
+        ll_c=fits[start].LogLike
         cpg_res += [fits[start].waltdt()[0]] #Add individual cpg res to cpg result table
         
         while end < len(fits)+1:
@@ -733,13 +748,13 @@ class pyMethObj():
             cpg_res += [fits[end-1].waltdt()[0]] #Add individual cpg res to cpg result table
             
             if start+min_cpgs < len(fits)+1: #Can we form a codistrib region
-        
+                X_c=np.vstack([X_c,fits[end-1].X])
+                X_star_c=np.vstack([X_star_c,fits[end-1].X_star])
                 cc_theta=np.vstack([fits[start].theta,fits[end-1].theta]).mean(axis=0) #Estimate of joint parameters
-                ll_c = beta_binomial_log_likelihood(np.hstack([fits[start].count,fits[end-1].count]),np.hstack([fits[start].total,fits[end-1].total]),
-                                                    np.vstack([fits[start].X,fits[end-1].X]),np.vstack([fits[start].X_star,fits[end-1].X_star]),
-                                                    fits[start].theta,n_params_abd,n_params_disp)
+                ll_s = ll_c + fits[end-1].LogLike
+                ll_c = beta_binomial_log_likelihood(np.hstack([fit.count for fit in fits[start:end]]),np.hstack([fit.total for fit in fits[start:end]]), #np.hstack([fits[start].total,fits[end-1].total]),
+                                                    X_c,X_star_c,fits[start].theta,n_params_abd,n_params_disp,link=link)
                 
-                ll_s = np.array([fits[start].LogLike,fits[end-1].LogLike]).sum()
                 n_samples=fits[start].X.shape[0]+fits[end-1].X.shape[0]
 
                 bic_c = -2 * ll_c + (n_params) * np.log(n_samples) 
@@ -752,8 +767,14 @@ class pyMethObj():
                     if (end-start) > min_cpgs+1: #Save region if number of cpgs > min_cpgs
                         cc_theta=np.vstack([fits[cpg].theta for cpg in range(start,end-2)]).mean(axis=0) #Estimate of joint parameters
                         region_res+=[corncob_cpg_local(f'{start}-{end-3}',np.vstack([fit.meth for fit in fits[start:end-2]]).sum(axis=0),np.vstack([fit.coverage for fit in fits[start:end-2]]).sum(axis=0),
-                                                       X=X,X_star=X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)] #Add regions results to results table
+                                                       X=X,X_star=X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta,link=link)] #Add regions results to results table
                     start=end-2
+                    X_c=fits[start].X
+                    X_star_c=fits[start].X_star
+                    ll_c=fits[start].LogLike
+                else:
+                    ll_s=ll_c
+                    
     
             else:
                 end += 1
@@ -761,7 +782,7 @@ class pyMethObj():
     
         if (end-start) > min_cpgs+1: #Save final region if number of cpgs > min_cpgs
             region_res+=[corncob_cpg_local(f'{start}-{end}',np.vstack([fit.meth for fit in fits[start:end]]).sum(axis=0),np.vstack([fit.coverage for fit in fits[start:end]]).sum(axis=0),
-                                           X=X,X_star=X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)]
+                                           X=X,X_star=X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta,link=link)]
     
         cpg_res = np.vstack(cpg_res)
         if not region_res:
@@ -773,7 +794,7 @@ class pyMethObj():
 
     @staticmethod
     @ray.remote
-    def corncob_region(region,fits,min_cpgs=3,param_names_abd=["intercept"],param_names_disp=["intercept"],maxiter=500,maxfev=500):
+    def corncob_region(region,fits,min_cpgs=3,param_names_abd=["intercept"],param_names_disp=["intercept"],maxiter=500,maxfev=500,link="arcsin"):
         """
         Perform differential methylation analysis on a single target region using beta binomial regression, with an option to compute differentially methylated regions of contigous cpgs whose
         mean and association with covariates are similar.
@@ -788,8 +809,6 @@ class pyMethObj():
             pandas dataframe(s): Dataframe containing estimates of coeficents for each covariate for each cpg in a region, with a seperate dataframe for region results if dmrs=True. 
         """
     
-        # fits=fits_id[region_id==region]
-    
         start=0
         end=2
         region_res=[]
@@ -799,22 +818,23 @@ class pyMethObj():
         n_samples = fits[start].X.shape[0]
         n_params=n_params_abd+n_params_disp
         bad_cpgs=0
-            
+        X_c=fits[start].X
+        X_star_c=fits[start].X_star
+        ll_c=fits[start].LogLike
         cpg_res += [fits[start].waltdt()[0]] #Add individual cpg res to cpg result table
-        ll_s = fits[start].LogLike 
         
         while end < len(fits)+1:
 
             cpg_res += [fits[end-1].waltdt()[0]] #Add individual cpg res to cpg result table
             
             if start+min_cpgs < len(fits)+1: #Can we form a codistrib region
-        
+                X_c=np.vstack([X_c,fits[end-1].X])
+                X_star_c=np.vstack([X_star_c,fits[end-1].X_star])
                 cc_theta=np.vstack([fits[start].theta,fits[end-1].theta]).mean(axis=0) #Estimate of joint parameters
-                ll_c = beta_binomial_log_likelihood(np.hstack([fits[start].count,fits[end-1].count]),np.hstack([fits[start].total,fits[end-1].total]),
-                                                    np.vstack([fits[start].X,fits[end-1].X]),np.vstack([fits[start].X_star,fits[end-1].X_star]),
-                                                    fits[start].theta,n_params_abd,n_params_disp)
+                ll_s = ll_c + fits[end-1].LogLike
+                ll_c = beta_binomial_log_likelihood(np.hstack([fit.count for fit in fits[start:end]]),np.hstack([fit.total for fit in fits[start:end]]), #np.hstack([fits[start].total,fits[end-1].total]),
+                                                    X_c,X_star_c,fits[start].theta,n_params_abd,n_params_disp,link=link)
                 
-                ll_s = np.array([fits[start].LogLike,fits[end-1].LogLike]).sum()
                 n_samples=fits[start].X.shape[0]+fits[end-1].X.shape[0]
 
                 bic_c = -2 * ll_c + (n_params) * np.log(n_samples) 
@@ -827,8 +847,14 @@ class pyMethObj():
                     if (end-start) > min_cpgs+1: #Save region if number of cpgs > min_cpgs
                         cc_theta=np.vstack([fits[cpg].theta for cpg in range(start,end-2)]).mean(axis=0) #Estimate of joint parameters
                         region_res+=[corncob_cpg_local(f'{start}-{end-3}',np.vstack([fit.meth for fit in fits[start:end-2]]).sum(axis=0),np.vstack([fit.coverage for fit in fits[start:end-2]]).sum(axis=0),
-                                                       X=X,X_star=X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)] #Add regions results to results table
+                                                       X=X,X_star=X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta,link=link)] #Add regions results to results table
                     start=end-2
+                    X_c=fits[start].X
+                    X_star_c=fits[start].X_star
+                    ll_c=fits[start].LogLike
+                else:
+                    ll_s=ll_c
+                    
     
             else:
                 end += 1
@@ -836,7 +862,7 @@ class pyMethObj():
     
         if (end-start) > min_cpgs+1: #Save final region if number of cpgs > min_cpgs
             region_res+=[corncob_cpg_local(f'{start}-{end}',np.vstack([fit.meth for fit in fits[start:end]]).sum(axis=0),np.vstack([fit.coverage for fit in fits[start:end]]).sum(axis=0),
-                                           X=X,X_star=X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta)]
+                                           X=X,X_star=X_star,maxiter=maxiter,maxfev=maxfev,region=region,param_names_abd=param_names_abd,param_names_disp=param_names_disp,start_params=cc_theta,link=link)]
     
         cpg_res = np.vstack(cpg_res)
         # cpg_res = np.hstack([cpg_res, np.tile(np.repeat(range(0,int(cpg_res.shape[0]/3)),3),(1,1)).T])

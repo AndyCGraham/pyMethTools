@@ -21,7 +21,7 @@ class Corncob_2():
         These must be in the same length and orientation as covariates
         
     """
-    def __init__(self, total, count, X=None, X_star=None, phi_init=0.5,param_names_abd=["intercept"],param_names_disp=["intercept"]):
+    def __init__(self, total, count, X=None, X_star=None, phi_init=0.5,param_names_abd=["intercept"],param_names_disp=["intercept"],link="arcsin"):
         # Assertions here TODO
 
         self.meth = total
@@ -35,6 +35,7 @@ class Corncob_2():
         self.n_ppar = self.n_param_abd + self.n_param_disp
         self.df_model = self.n_ppar
         self.df_residual = self.X.shape[0] - self.df_model
+        self.link = link
         
         if (self.df_residual) < 0:
             raise ValueError("Model overspecified. Trying to fit more parameters than sample size.")
@@ -56,17 +57,50 @@ class Corncob_2():
         self.execution_time = None
         self.fit_out = None
 
+    class ArcsineLink(Link):
+        def __init__(self):
+            self.__doc__ = "Arcsine link function"
+        
+        def _clean(self, p):
+            """Ensure probabilities are within (0, 1)"""
+            p = np.clip(p, 1e-10, 1 - 1e-10)
+            return p
+    
+        def inverse(self, z):
+            """Inverse of the link function"""
+            return np.sin(z)**2
+    
+        def inverse_deriv(self, z):
+            """Derivative of the inverse link function"""
+            return 2 * np.sin(z) * np.cos(z)
+    
+        def __call__(self, p):
+            """Apply the link function"""
+            p = self._clean(p)
+            return np.arcsin(np.sqrt(p))
+
     def corncob_init(self):
-        m = sm.GLM(
-            endog=pd.DataFrame([
-                self.count, # Success
-                self.total - self.count, # Failures
-            ]).T,
-            exog=self.X,
-            family=sm.families.Binomial()
-        ).fit()        
+        if self.link == "arcsin":
+            link_function = self.ArcsineLink()
+            m = sm.GLM(
+                endog=pd.DataFrame([
+                    self.count, # Success
+                    self.total - self.count, # Failures
+                ]).T,
+                exog=self.X,
+                family=sm.families.Binomial(link=link_function)
+            ).fit()       
+        else: 
+            m = sm.GLM(
+                endog=pd.DataFrame([
+                    self.count, # Success
+                    self.total - self.count, # Failures
+                ]).T,
+                exog=self.X,
+                family=sm.families.Binomial(link=link_function)
+            ).fit() 
         return(
-            list(m.params) + ([logit(self.phi_init)] * self.n_param_disp)
+            list(m.params) + ([np.arcsin(self.phi_init)] * self.n_param_disp)
         )
 
     @staticmethod
@@ -89,8 +123,12 @@ class Corncob_2():
         phi_wlink = self.X_star @ beta[-self.n_param_disp:]
     
         # Transform to scale (0, 1)
-        mu = expit(mu_wlink)
-        phi = expit(phi_wlink)
+        if self.link == "arcsin":
+            mu = np.sin(mu_wlink) ** 2
+            phi = np.sin(phi_wlink) ** 2
+        elif self.link == "logit":
+            mu = expit(mu_wlink)
+            phi = expit(phi_wlink)
     
         # Precompute shared terms
         phi_inv = (1 - phi) / phi
@@ -119,8 +157,13 @@ class Corncob_2():
                 self.X_star,
                 self.theta[-1*self.n_param_disp:]
             )
-        mu = expit(mu_wlink)
-        phi = expit(phi_wlink) 
+        # Transform to scale (0, 1)
+        if self.link == "arcsin":
+            mu = np.sin(mu_wlink) ** 2
+            phi = np.sin(phi_wlink) ** 2
+        elif self.link == "logit":
+            mu = expit(mu_wlink)
+            phi = expit(phi_wlink) 
         
         # define gam
         gam  = phi/(1 - phi)
@@ -249,7 +292,7 @@ class Corncob_2():
                 warnings.simplefilter('ignore', PerfectSeparationWarning)
                 start_params = self.corncob_init()
             except:
-                start_params = np.hstack([np.repeat(logit(self.phi_init),self.n_param_abd), np.repeat(logit(self.phi_init), self.n_param_disp)])
+                start_params = np.hstack([np.repeat(np.arcsin(self.phi_init),self.n_param_abd), np.repeat(np.arcsin(self.phi_init), self.n_param_disp)])
         
         # Fit the model using Nelder-Mead method and scipy minimize
         minimize_res = minimize(
@@ -268,7 +311,7 @@ class Corncob_2():
         
         return minimize_res
 
-def fit_cpg_local(meth,coverage,X,X_star,maxiter=500,maxfev=500,start_params=[],param_names_abd=["intercept"],param_names_disp=["intercept"]):
+def fit_cpg_local(meth,coverage,X,X_star,maxiter=500,maxfev=500,start_params=[],param_names_abd=["intercept"],param_names_disp=["intercept"],link="arcsin"):
         """
         Perform differential methylation analysis on a single cpg using beta binomial regression.
     
@@ -298,13 +341,14 @@ def fit_cpg_local(meth,coverage,X,X_star,maxiter=500,maxfev=500,start_params=[],
                     X=X,
                     X_star=X_star,
                     param_names_abd=param_names_abd,
-                    param_names_disp=param_names_disp
+                    param_names_disp=param_names_disp,
+                    link=link
                 )
         
         e_m = cc.fit(maxiter=maxiter,maxfev=maxfev,start_params=start_params)
         return cc
 
-def corncob_cpg_local(site,meth,coverage,X,X_star,maxiter=500,maxfev=500,region=None,res=True,LL=False,param_names_abd=["intercept"],param_names_disp=["intercept"],start_params=[]):
+def corncob_cpg_local(site,meth,coverage,X,X_star,maxiter=500,maxfev=500,region=None,res=True,LL=False,param_names_abd=["intercept"],param_names_disp=["intercept"],start_params=[],link="arcsin"):
     """
     Perform differential methylation analysis on a single cpg using beta binomial regression.
 
@@ -334,7 +378,8 @@ def corncob_cpg_local(site,meth,coverage,X,X_star,maxiter=500,maxfev=500,region=
                 X=X,
                 X_star=X_star,
                 param_names_abd=param_names_abd,
-                param_names_disp=param_names_disp
+                param_names_disp=param_names_disp,
+                link=link
             )
     
     e_m = cc.fit(maxiter=maxiter,maxfev=maxfev,start_params=start_params)
@@ -427,7 +472,7 @@ def corncob_region_local(region,fits,min_cpgs=3,param_names_abd=["intercept"],pa
             
         return cpg_res,region_res
 
-def beta_binomial_log_likelihood(count,total,X,X_star,beta,n_param_abd,n_param_disp):
+def beta_binomial_log_likelihood(count,total,X,X_star,beta,n_param_abd,n_param_disp,link="arcsin"):
         """
         Compute the negative log-likelihood for beta-binomial regression.
     
@@ -442,8 +487,12 @@ def beta_binomial_log_likelihood(count,total,X,X_star,beta,n_param_abd,n_param_d
         phi_wlink = X_star @ beta[-n_param_disp:]
     
         # Transform to scale (0, 1)
-        mu = expit(mu_wlink)
-        phi = expit(phi_wlink)
+        if link == "arcsin":
+            mu = np.sin(mu_wlink) ** 2
+            phi = np.sin(phi_wlink) ** 2
+        elif link == "logit":
+            mu = expit(mu_wlink)
+            phi = expit(phi_wlink)
     
         # Precompute shared terms
         phi_inv = (1 - phi) / phi
