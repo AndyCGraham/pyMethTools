@@ -1,11 +1,11 @@
 import pytest
+from pyMethTools.pyMethObj import pyMethObj
 import pyMethTools
-from pyMethTools.pyMethObj import *
+import pandas as pd
 import numpy as np
 from numpy import genfromtxt
 import scipy
 from scipy.special import expit
-
 np.random.seed(1)
 
 @pytest.fixture
@@ -24,12 +24,13 @@ def data(meth_levels):
         for cpg,k in zip(range(0, n_cpg+1),meth_levels):
             meth[cpg,sample]=np.random.binomial(n, k, 1)[0]
     regions = np.repeat([1,2,3], 5)
-    return meth,coverage,regions
+    positions=np.array(range(200,6600,450))
+    return meth,coverage,regions,positions
 
 @pytest.fixture
 def obj(data):
-    meth,coverage,regions=data
-    obj = pyMethObj(meth,coverage,regions)
+    meth,coverage,regions,positions=data
+    obj = pyMethObj(meth,coverage,regions,positions)
     return obj
 
 @pytest.fixture
@@ -38,9 +39,14 @@ def fit(obj):
     return obj
 
 @pytest.fixture
-def bbseq(fit):
-    fit.bbseq()
+def smooth(fit):
+    fit.smooth(10)
     return fit
+
+@pytest.fixture
+def bbseq(smooth):
+    smooth.bbseq()
+    return smooth
 
 @pytest.fixture
 def cometh(bbseq):
@@ -49,7 +55,7 @@ def cometh(bbseq):
 
 @pytest.fixture
 def sim(bbseq):
-    return bbseq.sim_multiple_cpgs(sample_size=15,use_codistrib_regions=True,ncpu=1,adjust_factor=[0.05,0.025],n_diff_regions=2)
+    return bbseq.sim_multiple_cpgs(sample_size=100,use_codistrib_regions=True,ncpu=1,adjust_factor=[0.05,0.025],n_diff_regions=2)
 
 @pytest.fixture
 def diff_data():
@@ -59,12 +65,14 @@ def diff_data():
     regions=regions.astype(int)
     X = pd.read_csv("tests/test_data/template_X.csv",index_col=0)
     X_star = pd.read_csv("tests/test_data/template_X_star.csv",index_col=0)
-    return meth,coverage,regions,X,X_star
+    positions=np.array(range(200,6600,450))
+    return meth,coverage,regions,positions,X,X_star
 
 @pytest.fixture
 def bbseq_res(diff_data):
-    obj=pyMethObj(diff_data[0],diff_data[1],diff_data[2],diff_data[3],diff_data[4])
+    obj=pyMethObj(diff_data[0],diff_data[1],diff_data[2],diff_data[3],diff_data[4],diff_data[5])
     obj.fit_betabinom()
+    obj.smooth(10)
     obj.bbseq()
     return obj
 
@@ -78,14 +86,14 @@ def test_obj_contents(fit,data):
     """
     Test that internal data is integrated correctly
     """
-    meth,coverage,regions=data
-    assert np.equal(fit.meth,meth).all()
+    meth,coverage,regions,positions=data
+    assert np.equal(np.vstack(fit.meth),meth).all()
 
 def test_fits(fit,meth_levels):
     """
     Test that inferred mu is fairly accurate
     """
-    assert all(([expit(fit.theta[0]) for fit in fit.fits] - np.array(meth_levels)) < 0.1)
+    assert all((np.sin(np.vstack(fit.fits)[:,0])**2 - np.array(meth_levels)) < 0.1)
 
 def test_cometh_class(cometh):
     """
@@ -97,8 +105,8 @@ def test_cometh_contents(cometh):
     """
     Test that the correct regions are found
     """
-    assert all(cometh == np.array(['0', '1_1-3', '1_1-3', '1_1-3', '4', '5', '2_1-3', '2_1-3',
-       '2_1-3', '9', '10', '3_1-3', '3_1-3', '3_1-3', '14'], dtype='str'))
+    assert all(cometh == np.array(['0', '1_1-3', '1_1-3', '1_1-3', '4', '0', '2_1-3', '2_1-3',
+       '2_1-3', '4', '0', '3_1-3', '3_1-3', '3_1-3', '4'], dtype='<U32'))
 
 def test_sim_meth_class(sim):
     assert isinstance(sim[0], np.ndarray) 

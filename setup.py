@@ -7,6 +7,8 @@ setup(
     url='https://github.com/AndyCGraham/methSimpy',
     author='Andy Graham',
     author_email='andygraham7162@gmail.com',
+    long_description=open("README.md").read(),
+    long_description_content_type="text/markdown",
     license='BSD 2-clause',
     packages=['pyMethTools'],
     install_requires=['numpy',
@@ -16,7 +18,6 @@ setup(
                       'matplotlib',
                       'seaborn'
                       ],
-
     classifiers=[
         'Development Status :: 1 - Planning',
         'Intended Audience :: Science/Research',
