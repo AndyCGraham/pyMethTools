@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_integer_dtype
 from scipy.optimize import minimize,Bounds
 from scipy.stats import betabinom
 from scipy.special import gammaln,binom,beta,logit,expit,digamma,polygamma
@@ -12,6 +13,7 @@ from ray.util.multiprocessing.pool import Pool
 import matplotlib.pyplot as plt
 import seaborn as sns
 import random
+import copy
 from pyMethTools.fit_cpg import *
 
 class pyMethObj():
@@ -77,7 +79,10 @@ class pyMethObj():
         counts = {}
         self.region_cpg_indices = np.array([counts[x]-1 for x in target_regions if not counts.update({x: counts.get(x, 0) + 1})])
         self.genomic_positions = genomic_positions
-        self.chr = chr
+        if chr is not None:
+            self.chr = chr
+        else:
+            self.chr = np.repeat("chr",len(genomic_positions))
 
         if not isinstance(covs, pd.DataFrame):
             covs = pd.DataFrame(np.repeat(1,meth.shape[1]))
@@ -497,26 +502,27 @@ class pyMethObj():
         beta = normalized_weights @ beta
         return beta
     
-    def wald_test(self, coef, padjust_method='fdr_bh'):
+    def wald_test(self, coef, padjust_method='fdr_bh', n_permute=1, find_dmrs=True, prop_sig=0.5, 
+                  fdr_thresh=0.05, max_gap=1000, min_cpgs=3, ncpu=1):
         if isinstance(coef, str):
             try:
-                coef = self.param_names_abd == coef
+                coef_idx = self.param_names_abd == coef
             except ValueError:
                 raise ValueError(f"Can't find terms to be tested: {coef}. Make sure it matches a column name in design matrix.")
 
         # Hypothesis testing
         p = self.X.shape[1]
-        betas = np.vstack(self.fits)[:,:self.n_param_abd][:, coef].flatten()
+        betas = np.vstack(self.fits)[:,:self.n_param_abd][:, coef_idx].flatten()
 
         # Take out SE estimates 
-        ses = np.vstack(self.se)[:,:self.n_param_abd][:, coef].flatten()
+        ses = np.vstack(self.se)[:,:self.n_param_abd][:, coef_idx].flatten()
 
         # Wald test, get p-values and FDR
         stat = betas / ses
         pvals = 2 * norm.sf(np.abs(stat))
         fdrs = multipletests(pvals, method=padjust_method)[1]
 
-        # Return a data frame
+        # Results data frame
         res = pd.DataFrame({
             'chr': self.chr,
             'pos': self.genomic_positions,
@@ -525,7 +531,180 @@ class pyMethObj():
             'fdrs': fdrs
         })
 
-        return res
+        if n_permute > 1:
+            # Permute the labels of the specified column
+            perm_stats = self.permute_and_refit(coef, N=n_permute, ncpu=ncpu)
+            # Calculate the empirical p-value (two-sided)
+            emp_pval = np.mean(perm_stats["stats"].values >= stat[:, np.newaxis], axis=1)
+
+            res["emp_pvals"] = emp_pval
+            res["emp_fdrs"] = multipletests(emp_pval, method=padjust_method)[1]
+            
+        if find_dmrs:
+            dmr_res = self.find_significant_regions(res,prop_sig=prop_sig,fdr_thresh=fdr_thresh,max_gap=max_gap)
+            if n_permute > 1:
+                permuted_dmrs = []
+                for perm in range(n_permute):
+                    # Create a mask that is True for all columns except the one to delete
+                    stat = perm_stats["stats"].iloc[:, perm].values
+                    emp_pval = np.mean(
+                        perm_stats["stats"].iloc[:,-perm].values >= 
+                        stat[:, np.newaxis], axis=1)
+                    perm_res = pd.DataFrame({
+                                            'chr': self.chr,
+                                            'pos': self.genomic_positions,
+                                            'stat': perm_stats["stats"].values[:,perm],
+                                            'pvals': perm_stats["pvals"].values[:,perm],
+                                            'fdrs': perm_stats["fdrs"].values[:,perm],
+                                            'emp_pvals': emp_pval,
+                                            'emp_fdrs': multipletests(emp_pval, method=padjust_method)[1]
+                                        })
+                    permuted_dmrs.append(self.find_significant_regions(perm_res,prop_sig=prop_sig,
+                                                                       fdr_thresh=fdr_thresh,max_gap=max_gap,
+                                                                       min_cpgs=min_cpgs))
+
+                # Concatenate the permuted DMRs, if none find add one with 0 cpgs
+                permuted_prop_sig_cpgs = [perm.prop_sig_cpgs.values if not perm.empty else np.array([0]) for perm in permuted_dmrs]
+                permuted_prop_sig_cpgs = np.hstack(permuted_prop_sig_cpgs)
+                # Calculate the empirical p-value - how many times did we see such a region in the permutations
+                emp_pval = [np.mean(permuted_prop_sig_cpgs >= region_stats) for region_stats in dmr_res["prop_sig_cpgs"]]
+                dmr_res["emp_pvals"] = emp_pval
+                dmr_res["emp_fdrs"] = multipletests(emp_pval, method=padjust_method)[1]
+
+            return res, dmr_res
+
+        else:
+            return res
+    
+    @staticmethod
+    def find_significant_regions(df, prop_sig=0.5, fdr_thresh=0.05, max_gap=1000, min_cpgs=3):
+        """
+        Find regions of adjacent CpGs where:
+        - The gap between successive CpGs is less than max_gap,
+        - The overall proportion of CpGs with fdr < fdr_thresh is >= prop_sig,
+        - And both the first and last CpG in the region are significant (fdr < fdr_thresh).
+
+        Parameters:
+            df (pd.DataFrame): DataFrame with columns 'chr', 'pos', and 'fdrs'.
+            max_gap (int): Maximum allowed gap between adjacent CpGs.
+            prop_sig (float): Minimum proportion of CpGs in a region that must have fdr < fdr_thresh.
+            fdr_thresh (float): FDR threshold for significance.
+            
+        Returns:
+            pd.DataFrame: DataFrame with columns 'chr', 'start', 'end', 'num_cpgs',
+                        'num_sig_cpgs', and 'prop_sig_cpgs' for each region.
+        """
+        significant_regions = []
+        # Sort the DataFrame by chromosome and position.
+        df = df.sort_values(by=['chr', 'pos']).reset_index(drop=True)
+        
+        # Process each chromosome separately.
+        for chr_name, group in df.groupby('chr'):
+            # Reset index within the group for 0-based indexing.
+            chr_df = group.reset_index(drop=True)
+            positions = chr_df['pos'].to_numpy()
+            # Binary significance indicator: 1 if fdr < fdr_thresh, 0 otherwise.
+            sig = (chr_df['fdrs'] < fdr_thresh).astype(int).to_numpy()
+            n = len(chr_df)
+            used_cpgs = set()  # For this chromosome only.
+
+            i = 0
+            while i < n:
+                # Skip if not significant or already used.
+                if sig[i] == 0 or i in used_cpgs:
+                    i += 1
+                    continue
+
+                # Identify contiguous block where gaps are within max_gap.
+                start_idx = i
+                end_idx = i
+                while end_idx + 1 < n and (positions[end_idx + 1] - positions[end_idx] <= max_gap):
+                    end_idx += 1
+                    if end_idx in used_cpgs:
+                        break
+
+                # Binary search over [i, end_idx] for the furthest index where
+                # the overall proportion meets prop_sig.
+                lo, hi = i, end_idx
+                valid_idx = i
+                while lo <= hi:
+                    mid = (lo + hi) // 2
+                    num_cpgs = mid - i + 1
+                    num_sig = int(np.sum(sig[i:mid+1]))
+                    if num_sig / num_cpgs >= prop_sig:
+                        valid_idx = mid
+                        lo = mid + 1
+                    else:
+                        hi = mid - 1
+                
+                # Now ensure that the last CpG in the region is itself significant.
+                while valid_idx > i and chr_df['fdrs'].iloc[valid_idx] >= fdr_thresh:
+                    valid_idx -= 1
+
+                # Define the region using the trimmed indices.
+                region = chr_df.iloc[i:valid_idx + 1]
+                num_cpgs = len(region)
+                num_sig = (region['fdrs'] < fdr_thresh).sum()
+                prop = num_sig / num_cpgs if num_cpgs > 0 else 0
+                
+                # Only record if region still meets criteria.
+                if num_cpgs >= min_cpgs and prop >= prop_sig:
+                    significant_regions.append({
+                        'chr': chr_name,
+                        'start': region['pos'].iloc[0],
+                        'end': region['pos'].iloc[-1],
+                        'num_cpgs': num_cpgs,
+                        'num_sig_cpgs': num_sig,
+                        'prop_sig_cpgs': prop
+                    })
+                    used_cpgs.update(region.index)
+                
+                # Move to the next candidate region.
+                i = valid_idx + 1
+
+        return pd.DataFrame(significant_regions)
+    
+    def permute_and_refit(self, coef, N=100, padjust_method='fdr_bh', ncpu=1):
+        """
+        Refit the beta-binomial regression model and compute Wald test statistics N times,
+        randomly permuting the labels of a given column in self.X.
+
+        Parameters:
+            column (str): The name of the column in self.X to permute.
+            N (int): The number of permutations.
+            padjust_method (str): Method to adjust p-values for multiple testing.
+
+        Returns:
+            pd.DataFrame: DataFrame containing the permuted Wald test statistics.
+        """
+        assert coef in self.param_names_abd, f"Column '{coef}' not found in self.X"
+        coef_idx = self.param_names_abd == coef
+        permuted_stats = []
+        permuted_pvals = []
+        permuted_fdrs = []
+
+        for i in range(N):
+            # Permute the labels of the specified column
+            permuted_obj = self.copy()
+            permuted_obj.X[:,coef_idx] = np.random.permutation(permuted_obj.X[:,coef_idx])
+
+            # Refit the model
+            permuted_obj.fit_betabinom(ncpu=ncpu)
+
+            # Compute Wald test statistics
+            wald_res = permuted_obj.wald_test(coef, padjust_method=padjust_method, n_permute=1, find_dmrs=False)
+            permuted_stats.append(wald_res['stat'].values)
+            permuted_pvals.append(wald_res['pvals'].values)
+            permuted_fdrs.append(wald_res['fdrs'].values)
+
+        # Combine results into a DataFrame
+        permuted_stats_df = pd.DataFrame(np.vstack(permuted_stats).T, columns=[f'perm_{i}' for i in range(N)])
+        permuted_pvals_df = pd.DataFrame(np.vstack(permuted_pvals).T, columns=[f'perm_{i}' for i in range(N)])
+        permuted_fdrs_df = pd.DataFrame(np.vstack(permuted_fdrs).T, columns=[f'perm_{i}' for i in range(N)])
+
+        permuted_stats = {"stats": permuted_stats_df, "pvals": permuted_pvals_df, "fdrs": permuted_fdrs_df}
+
+        return permuted_stats
 
     def find_codistrib_regions(self,site_names:np.ndarray=np.array([]),dmrs: bool=True,min_cpgs: int=3,ncpu: int=1,maxiter=500,maxfev=500,chunksize=1):
         """
@@ -1178,7 +1357,7 @@ class pyMethObj():
             
         return res
 
-    def region_plot(self,region: int,contrast: str|list="",beta_vals: np.ndarray=np.array([]),show_codistrib_regions=True,smooth=False):
+    def region_plot(self,region: int,contrast: str|list="",beta_vals: np.ndarray=np.array([]),show_codistrib_regions=True,dmrs=None,smooth=False):
         """
         Plot methylation level within a region.
     
@@ -1190,6 +1369,14 @@ class pyMethObj():
             show_codistrib_regions (bool, default: True): Whether to show codistributed regions as shaded areas on the plot.
         """
 
+        if dmrs is not None:
+            assert isinstance(dmrs, pd.DataFrame), "dmrs must be a pandas dataframe"
+            assert all(col in dmrs.columns for col in ["start", "end"]), "dmrs must contain columns named 'start' and 'end'"
+            assert is_integer_dtype(dmrs['start']), "The 'start' column is not of integer dtype."
+            assert is_integer_dtype(dmrs['end']), "The 'end' column is not of integer dtype."
+            assert all(dmrs["start"] < dmrs["end"]), "dmrs column 'start' must be less than 'end'"
+            assert all(dmrs["start"] >= 0), "dmrs column 'start' must be greater than or equal to 0"
+            show_codistrib_regions = False
         if show_codistrib_regions:
             assert len(self.codistrib_regions) > 0, "Run bbseq with dmrs=True to find codistributed regions before setting show_codistrib_regions=True"
         if smooth:
@@ -1227,12 +1414,23 @@ class pyMethObj():
 
         if show_codistrib_regions:
             assert len(self.codistrib_regions) == self.ncpgs, "Run bbseq before simulating if codistrib_regions=True"
-            unique_codistrib_regions = self.unique(self.codistrib_regions[self.target_regions == region])
+            unique_codistrib_regions = np.array(self.unique(self.codistrib_regions[self.target_regions == region]))
             region_colours=["lightgrey","#5bd7f0", "lightgreen","#f0e15b", "#f0995b", "#db6b6b", "#cd5bf0", "#34b1eb", "#9934eb"] + [f"#{random.randrange(0x1000000):06x}" for _ in range(max(0,len(unique_codistrib_regions)-9))]
             codistrib_regions = self.codistrib_regions[self.target_regions == region]
-            cdict = {x: region_colours[i] for i,x in enumerate(unique_codistrib_regions)}
+            cdict = {x: region_colours[i] for i,x in enumerate(unique_codistrib_regions[unique_codistrib_regions!="0"])}
+            cdict["0"] = "white"
             region_plot["region"] = [cdict[x] for x in codistrib_regions]
-        if show_codistrib_regions:  
+            region_plot=pd.melt(region_plot, id_vars=["CpG","region"],value_name='Beta Value')
+        elif dmrs is not None:
+            dmrs_regions = np.hstack([dmrs.loc[(dmrs["start"] <= pos) & (dmrs["end"] >= pos), ["chr","start","end"]].apply(lambda row: '_'.join(row.values.astype(str)), axis=1).values
+                         if any((pos >= dmrs["start"]) & (pos <= dmrs["end"])) 
+                         else "0" for pos in self.genomic_positions[self.target_regions == region]])
+            unique_dmrs_regions = np.array(self.unique(dmrs_regions))
+            region_colours=(["lightgrey","#5bd7f0", "lightgreen","#f0e15b", "#f0995b", "#db6b6b", "#cd5bf0", "#34b1eb", "#9934eb"] + 
+                            [f"#{random.randrange(0x1000000):06x}" for _ in range(max(0,len(unique_dmrs_regions)-9))])
+            cdict = {x: region_colours[i] for i,x in enumerate(unique_dmrs_regions[unique_dmrs_regions!="0"])}
+            cdict["0"] = "white"
+            region_plot["region"] = [cdict[x] for x in dmrs_regions]
             region_plot=pd.melt(region_plot, id_vars=["CpG","region"],value_name='Beta Value')
         else:
             region_plot=pd.melt(region_plot, id_vars=["CpG"],value_name='Beta Value')
@@ -1240,7 +1438,7 @@ class pyMethObj():
             ax = sns.lineplot(region_plot, x="CpG", y="Beta Value")
         else:
             ax = sns.lineplot(region_plot, x="CpG", y="Beta Value", hue="variable")
-        if show_codistrib_regions:
+        if show_codistrib_regions or dmrs is not None:
             ranges = region_plot.groupby('region')['CpG'].agg(['min', 'max'])
             for i, row in ranges.iterrows():
                 ax.axvspan(xmin=row['min'], xmax=row['max'], facecolor=i, alpha=0.3)
@@ -1251,7 +1449,10 @@ class pyMethObj():
                 for group in self.unique(contrast):
                     sns.scatterplot(region_plot[region_plot["variable"]==self.unique(contrast)[0]], x="CpG", y=means[group], 
                                     c=region_plot[region_plot["variable"]==self.unique(contrast)[0]].drop_duplicates("CpG")["region"], ax=ax,edgecolor="black")
+        if show_codistrib_regions:
             ax.set_title(f"Codistributed Regions in Region {region}")
+        elif dmrs is not None:
+            ax.set_title(f"DMRs in Region {region}")
         else:
             if len(contrast) == 0:
                 sns.scatterplot(region_plot, x="CpG", y=means, ax=ax)
@@ -1311,3 +1512,12 @@ class pyMethObj():
             return params.min(),params.max()
         elif type=="max":
             return params.max()
+        
+    def copy(self):
+        """
+        Create a deep copy of the pyMethObj instance.
+
+        Returns:
+            pyMethObj: A deep copy of the current instance.
+        """
+        return copy.deepcopy(self)
