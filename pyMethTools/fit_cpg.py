@@ -4,11 +4,12 @@ import pandas as pd
 import numpy as np
 import statsmodels.api as sm
 from scipy import stats
-from scipy.optimize import minimize
+from scipy.optimize import minimize,OptimizeResult
 from scipy import linalg
-from scipy.stats import t,rankdata
+from scipy.stats import t,rankdata,norm
 from scipy.optimize._numdiff import approx_derivative
 from scipy.special import logit,expit, digamma, polygamma
+from numpy.linalg import svd, inv, LinAlgError
 import ray
 import warnings
 
@@ -21,13 +22,20 @@ class Corncob_2():
         These must be in the same length and orientation as covariates
         
     """
-    def __init__(self, total, count, X=None, X_star=None, phi_init=0.5,param_names_abd=["intercept"],param_names_disp=["intercept"],link="arcsin",theta=None):
+    def __init__(self, total, count, X=None, X_star=None, phi_init=0.5,param_names_abd=["intercept"],param_names_disp=["intercept"],link="arcsin",
+                 fit_method="gls",sample_weights=None,theta=None):
         # Assertions here TODO
 
         self.meth = total
         self.coverage = count
+        if sample_weights is not None:
+            self.sample_weights = sample_weights[~np.isnan(total)]
+        else:
+            self.sample_weights = np.ones(sum(~np.isnan(total)))
         self.total = total[~np.isnan(total)]
         self.count = count[~np.isnan(total)]
+        self.Z = np.arcsin(np.sqrt((self.count / self.total))) # Transformed methylation proportions
+        self.n_samples = self.total.shape[0]
         self.X = X[~np.isnan(total)]
         self.X_star = X_star[~np.isnan(total)]
         self.n_param_abd = X.shape[1]
@@ -36,12 +44,14 @@ class Corncob_2():
         self.df_model = self.n_ppar
         self.df_residual = self.X.shape[0] - self.df_model
         self.link = link
+        self.fit_method = fit_method
         
         if (self.df_residual) < 0:
             raise ValueError("Model overspecified. Trying to fit more parameters than sample size.")
         
         self.param_names_abd = param_names_abd
         self.param_names_disp = param_names_disp
+        self.param_names = np.hstack([param_names_abd,param_names_disp])
         self.phi_init = phi_init
         
         # Inits
@@ -223,69 +233,134 @@ class Corncob_2():
         Hessian = np.concatenate((upper_row, lower_row), axis=0)
     
         return Hessian
-
-    def waltdt(self):
-        if self.theta is None:
-            raise ValueError("No fitted parameters. Please run fit first")
-        # Implicit else we have some parameters
-        # Dataframes
-        result_table_abd = pd.DataFrame(
-            index=self.param_names_abd,
-            columns=[
-                'Estimate',
-                'se',
-                't',
-                'p'
-            ]
-        )
-        result_table_abd['Estimate'] = self.params_abd
-        result_table_disp = pd.DataFrame(
-            index=self.param_names_disp,
-            columns=[
-                'Estimate',
-                'se',
-                't',
-                'p'
-            ]
-        )
-        result_table_disp['Estimate'] = self.params_disp
+    
+    def gls(self, c1=1e-100):
+        """
+        Fits a single CpG model using a two-stage weighted least squares procedure with optional sample weights.
         
-        # Calculate SE
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore', RuntimeWarning)
-                # Compute the Hessian numerically at the optimized parameters
-                hessian = self.compute_hessian()
-                # Invert the Hessian to get the variance-covariance matrix
-                covMat = np.linalg.inv(hessian) @ hessian @ np.linalg.inv(hessian)
-        except np.linalg.LinAlgError:
-            # print("Hessian matrix is singular or ill-conditioned. Cannot compute variance-covariance matrix.")
-            covMat = np.full_like(hessian, np.nan)  # Fill with NaNs
+        This method uses the following attributes from the object:
+        - self.count         : methylated counts
+        - self.total         : coverage counts
+        - self.X             : design matrix 
+        - self.Z             : transformed methylation levels
+        - self.n_samples     : number of samples 
+        - self.n_param_abd   : number of parameters 
+        - self.sample_weights     : optional array of sample-specific weights (default: None, which means equal weights)
+        - c1                 : small constant to bound phi away from 0 and 1 (default: 1e-10)
+        
+        Returns:
+        An OptimizeResult-like object with attributes:
+            x         : estimated regression coefficients (beta0+phi),
+            fun       : the estimated dispersion (phi),
+            se_beta0  : standard errors of the regression coefficients,
+            var_beta0 : flattened variance-covariance matrix,
+            phi       : dispersion estimate,
+            success   : True if completed successfully,
+            message   : a string message.
+        Returns None if there is insufficient data or the design matrix is singular.
+        """
+        # Use only indices where self.total > 0.
+        ix = self.total > 0
+        if np.mean(ix) < 1:
+            # Subset the data to non-missing entries.
+            X = self.X[ix, :]
+            count = self.count[ix]
+            total = self.total[ix]
+            Z = self.Z[ix]
+            # If sample weights provided, subset those too
+            if self.sample_weights is not None:
+                self.sample_weights = self.sample_weights[ix]
+                
+            # Check that there are enough degrees of freedom for regression.
+            if X.shape[0] < X.shape[1] + 1:
+                result = OptimizeResult()
+                result.x = np.repeat(np.nan,X.shape[1]+1)   # estimated coefficients
+                result.se_beta0 = np.nan
+                result.var_beta0 = np.nan
+                result.success = False
+                result.message = "Not enough degrees of freedom. Require more samples than parameters."
+                return result
+            
+            # Check that the design matrix is full rank.
+            U, s, Vt = np.linalg.svd(X)
+            if np.any(np.abs(s) < 1e-10):
+                result = OptimizeResult()
+                result.x = np.repeat(np.nan,X.shape[1]+1)   # estimated coefficients
+                result.se_beta0 = np.nan
+                result.var_beta0 = np.nan
+                result.success = False
+                result.message = "Design matrix is not full rank"
+                return result
+        else:
+            # If no missing entries, use the full data.
+            X = self.X
+            count = self.count
+            total = self.total
+            Z = self.Z
+        
+        # Update the number of samples based on the (possibly subset) data.
+        n_samples = X.shape[0]
+        p = self.n_param_abd
 
-        # Implicit else we could calculate se
+        # --- First round of weighted least squares ---
+        # Combine coverage weights with sample weights
+        combined_weights = total * self.sample_weights
+        XTVinv = (X * combined_weights[:, np.newaxis]).T
+        XtX = np.dot(XTVinv, X)
+        try:
+            beta0 = np.linalg.solve(XtX, np.dot(XTVinv, Z))
+        except np.linalg.LinAlgError:
+            result = OptimizeResult()
+            result.x = np.repeat(np.nan,X.shape[1]+1)   # estimated coefficients
+            result.se_beta0 = np.nan
+            result.var_beta0 = np.nan
+            result.success = False
+            result.message = "Unable to compute covariance matrix."
+            return result
+
+        # --- Compute dispersion estimate ---
+        # Compute residuals: Z - X @ beta0
+        residual = Z - np.dot(X, beta0)
+        # Compute phiHat with sample weights incorporated
+        weighted_sum_sq = np.sum((residual**2) * combined_weights)
+        weighted_sum = np.sum(combined_weights)
+        effective_df = np.sum(self.sample_weights) - p
+        phiHat = (weighted_sum_sq - effective_df) * np.sum(self.sample_weights) / effective_df / np.sum((total - 1) * self.sample_weights)
+        phiHat = np.clip(phiHat, c1, 1 - c1)
+        
+        # --- Second round of regression ---
+        # Define new weights based on phiHat and sample weights
+        Vinv = self.sample_weights * total / (1 + (total - 1) * phiHat)
+        XTVinv = (X * Vinv[:, np.newaxis]).T
+        XtX = np.dot(XTVinv, X)
+        try:
+            XtX_inv = np.linalg.inv(XtX)
+        except np.linalg.LinAlgError:
+            result = OptimizeResult()
+            result.x = np.repeat(np.nan,X.shape[1]+1)   # estimated coefficients
+            result.se_beta0 = np.nan
+            result.var_beta0 = np.nan
+            result.success = False
+            result.message = "Unable to compute covariance matrix."
+            return result
+        beta0 = np.dot(XtX_inv, np.dot(XTVinv, Z))
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', RuntimeWarning)
-            se = np.sqrt(np.diag(covMat))
-            # Tvalues
-            tvalue = self.theta/se
-        # And pvalues
-        pval = stats.t.sf(np.abs(tvalue), self.df_residual)*2
+            se_beta0 = np.sqrt(np.diag(XtX_inv))
+        var_beta0 = XtX_inv.flatten()
 
-        
-        result_table_abd['se'] = se[:self.n_param_abd]
-        result_table_abd['t'] = tvalue[:self.n_param_abd]
-        result_table_abd['p'] = pval[:self.n_param_abd]  
+        # Create an OptimizeResult-like object.
+        result = OptimizeResult()
+        result.x = np.append(beta0,phiHat)   # estimated coefficients
+        result.se_beta0 = se_beta0
+        result.var_beta0 = var_beta0
+        result.success = True
+        result.message = "gls completed successfully."
+        result.var = var_beta0
 
-        result_table_disp['se'] = se[-1*self.n_param_disp:]
-        result_table_disp['t'] = tvalue[-1*self.n_param_disp:]
-        result_table_disp['p'] = pval[-1*self.n_param_disp:]
+        return result
         
-        return((
-            result_table_abd,
-            result_table_disp
-        ))
-    
-    def fit(self, start_params=[], maxiter=10000, maxfev=5000, method='Nelder-Mead', **kwds):
+    def fit(self, start_params=[], maxiter=10000, maxfev=5000, minimize_method='Nelder-Mead', **kwds):
         if len(start_params) == 0:
             # Reasonable starting values
             try:
@@ -295,20 +370,24 @@ class Corncob_2():
                 start_params = np.hstack([np.repeat(np.arcsin(self.phi_init),self.n_param_abd), np.repeat(np.arcsin(self.phi_init), self.n_param_disp)])
         
         # Fit the model using Nelder-Mead method and scipy minimize
-        minimize_res = minimize(
-            self.beta_binomial_log_likelihood,
-            start_params,
-            method=method,
-            options={"maxiter": maxiter, "maxfev":maxfev}
-        )
-        self.fit_out = minimize_res
-        self.theta = minimize_res.x
-        self.params_abd = minimize_res.x[:self.n_param_abd]
-        self.params_disp = minimize_res.x[-1*self.n_param_disp:]
-        self.converged = minimize_res.success
-        self.method = method
-        self.LogLike = -1*minimize_res.fun
-        
+        if self.fit_method=="gls":
+            minimize_res = self.gls()
+        if minimize_res.success == False or self.fit_method=="mle":
+            print("Failed GLS")
+            #Minimize the log-likelihood
+            minimize_res = minimize(
+                self.beta_binomial_log_likelihood,
+                start_params,
+                method=minimize_method,
+                options={"maxiter": maxiter, "maxfev":maxfev}
+            )
+            self.LogLike = -1*minimize_res.fun
+            # Compute the Hessian numerically at the optimized parameters
+            hessian = self.compute_hessian()
+            # Invert the Hessian to get the variance-covariance matrix
+            covMat = np.linalg.inv(hessian) @ hessian @ np.linalg.inv(hessian)
+            minimize_res.se_beta0 = np.sqrt(np.diag(covMat))
+
         return minimize_res
 
 def beta_binomial_log_likelihood(count,total,X,X_star,beta,n_param_abd,n_param_disp,link="arcsin"):
@@ -342,7 +421,8 @@ def beta_binomial_log_likelihood(count,total,X,X_star,beta,n_param_abd,n_param_d
         LL = stats.betabinom.logpmf(count, total, a, b)
         return np.sum(LL) 
 
-def fit_cpg_local(meth,coverage,X,X_star,maxiter=500,maxfev=500,start_params=[],param_names_abd=["intercept"],param_names_disp=["intercept"],link="arcsin"):
+def fit_cpg_local(meth,coverage,X,X_star,maxiter=500,maxfev=500,start_params=[],param_names_abd=["intercept"],param_names_disp=["intercept"],
+                  link="arcsin",fit_method="gls",sample_weights=None):
         """
         Perform differential methylation analysis on a single cpg using beta binomial regression.
     
@@ -373,13 +453,16 @@ def fit_cpg_local(meth,coverage,X,X_star,maxiter=500,maxfev=500,start_params=[],
                     X_star=X_star,
                     param_names_abd=param_names_abd,
                     param_names_disp=param_names_disp,
-                    link=link
+                    link=link,
+                    sample_weights=sample_weights,
+                    fit_method=fit_method
                 )
         
         e_m = cc.fit(maxiter=maxiter,maxfev=maxfev,start_params=start_params)
         return e_m.x
 
-def corncob_cpg_local(site,meth,coverage,X,X_star,maxiter=500,maxfev=500,region=None,res=True,LL=False,param_names_abd=["intercept"],param_names_disp=["intercept"],start_params=[],link="arcsin"):
+def corncob_cpg_local(site,meth,coverage,X,X_star,maxiter=500,maxfev=500,region=None,res=True,LL=False,param_names_abd=["intercept"],
+                      param_names_disp=["intercept"],start_params=[],link="arcsin",sample_weights=None):
     """
     Perform differential methylation analysis on a single cpg using beta binomial regression.
 
@@ -410,7 +493,8 @@ def corncob_cpg_local(site,meth,coverage,X,X_star,maxiter=500,maxfev=500,region=
                 X_star=X_star,
                 param_names_abd=param_names_abd,
                 param_names_disp=param_names_disp,
-                link=link
+                link=link,
+                sample_weights=sample_weights
             )
     
     e_m = cc.fit(maxiter=maxiter,maxfev=maxfev,start_params=start_params)
@@ -526,7 +610,8 @@ def corncob_region(region,fits,meth,coverage,X,X_star,min_cpgs=3,param_names_abd
             
         return cpg_res,region_res,codistrib_regions
 
-def beta_binomial_log_likelihood(count,total,X,X_star,beta,n_param_abd,n_param_disp,link="arcsin"):
+def beta_binomial_log_likelihood(count,total,X,X_star,beta,n_param_abd,n_param_disp,
+                                 link="arcsin",epsilon=1e+10):
         """
         Compute the negative log-likelihood for beta-binomial regression.
     
@@ -562,6 +647,11 @@ def beta_binomial_log_likelihood(count,total,X,X_star,beta,n_param_abd,n_param_d
         phi_inv = (1 - phi) / phi
         a = mu * phi_inv
         b = (1 - mu) * phi_inv
+
+        scale_factor = np.maximum(a, b) / 1e+10
+        scale_factor = np.maximum(scale_factor, 1)  # Ensure scale_factor is at least 1
+        a /= scale_factor
+        b /= scale_factor
     
         # Compute log-likelihood in a vectorized manner
         log_likelihood = np.sum(stats.betabinom.logpmf(count, total, a.T, b.T))
