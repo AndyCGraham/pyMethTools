@@ -220,11 +220,19 @@ def test_find_codistrib_regions(fitted_obj):
 def test_sim_multiple_cpgs(fitted_obj):
     fitted_obj.codistrib_regions = np.array(['0', '1_1-3', '1_1-3', '1_1-3', '4', '0', '2_1-3', '2_1-3',
        '2_1-3', '4', '0', '3_1-3', '3_1-3', '3_1-3', '4'])
-    meth_sim, coverage_sim = fitted_obj.sim_multiple_cpgs()
-    assert meth_sim.shape == coverage_sim.shape
-    assert np.allclose(meth_sim.mean(), fitted_obj.meth.mean(), atol=10)
-    assert np.allclose(coverage_sim.mean(), fitted_obj.coverage.mean(), atol=10)
-    assert meth_sim.shape[1] == 100  # default sample size
+    sim_meth,sim_coverage,adjust,adjust_regions = fitted_obj.sim_multiple_cpgs(
+                                                        sample_size=15,
+                                                        use_codistrib_regions=True,
+                                                        ncpu=1,adjust_factor=0.15,
+                                                        n_diff_regions=[2,0],
+                                                        chunksize=1)
+    np.random.seed(42)
+    assert sim_meth.shape == sim_coverage.shape
+    assert np.allclose(sim_meth[adjust==0].mean(), fitted_obj.meth[adjust==0].mean(), atol=10)
+    assert np.allclose(sim_coverage.mean(), fitted_obj.coverage.mean(), atol=10)
+    assert sim_meth.shape[0] == fitted_obj.meth.shape[0]  # Same ncpgs as data
+    assert sim_meth.shape[1] == 15  # default sample size
+    assert all(sim_meth[adjust==0.15].mean(axis=1) > fitted_obj.meth[adjust==0.15].mean(axis=1))
 
 def test_region_plot(fitted_obj):
     fitted_obj.codistrib_regions = np.array(['0', '1_1-3', '1_1-3', '1_1-3', '4', '0', '2_1-3', '2_1-3',
