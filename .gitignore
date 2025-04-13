@@ -1,0 +1,5 @@
+pyMethTools_venv/
+**__pycache__/** 
+**.ipynb_checkpoints/**
+**.vscode/**
+**.pytest_cache/**

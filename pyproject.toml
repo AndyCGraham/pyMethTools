@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyMethTools"
+version = "0.3.0"
+description = "A Python package for analysis of targetted methylation data"
+readme = "README.md"
+authors = [
+    {name = "Andy Graham", email = "andygraham7162@gmail.com"}
+]
+license = {text = "BSD 2-clause"}
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11"
+]
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[project.urls]
+homepage = "https://github.com/AndyCGraham/pyMethTools"
+
+[tool.setuptools]
+packages = ["pyMethTools"]

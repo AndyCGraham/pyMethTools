@@ -1,0 +1,11 @@
+README.md
+pyproject.toml
+pyMethTools/__init__.py
+pyMethTools/fit_cpg.py
+pyMethTools/pyMethObj.py
+pyMethTools.egg-info/PKG-INFO
+pyMethTools.egg-info/SOURCES.txt
+pyMethTools.egg-info/dependency_links.txt
+pyMethTools.egg-info/requires.txt
+pyMethTools.egg-info/top_level.txt
+tests/test_pyMethObj.py
