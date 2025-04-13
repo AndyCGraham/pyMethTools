@@ -41,6 +41,7 @@ frozendict @ file:///Users/runner/miniforge3/conda-bld/frozendict_1715092779444/
 frozenlist==1.5.0
 h11 @ file:///home/conda/feedstock_root/build_artifacts/h11_1664132893548/work
 h2 @ file:///home/conda/feedstock_root/build_artifacts/h2_1634280454336/work
+hmmlearn==0.3.3
 hpack==4.0.0
 httpcore @ file:///home/conda/feedstock_root/build_artifacts/httpcore_1711596990900/work
 httpx @ file:///home/conda/feedstock_root/build_artifacts/httpx_1708530890843/work
@@ -55,6 +56,7 @@ ipywidgets==8.1.5
 isoduration @ file:///home/conda/feedstock_root/build_artifacts/isoduration_1638811571363/work/dist
 jedi @ file:///home/conda/feedstock_root/build_artifacts/jedi_1696326070614/work
 Jinja2 @ file:///home/conda/feedstock_root/build_artifacts/jinja2_1704966972576/work
+joblib==1.4.2
 json5 @ file:///home/conda/feedstock_root/build_artifacts/json5_1712986206667/work
 jsonpatch @ file:///home/conda/feedstock_root/build_artifacts/jsonpatch_1695536281965/work
 jsonpointer @ file:///Users/runner/miniforge3/conda-bld/jsonpointer_1695397382064/work
@@ -72,6 +74,7 @@ jupyterlab_server @ file:///home/conda/feedstock_root/build_artifacts/jupyterlab
 jupyterlab_widgets==3.0.13
 kiwisolver==1.4.8
 libmambapy @ file:///Users/runner/miniforge3/conda-bld/mamba-split_1711394373090/work/libmambapy
+llvmlite==0.44.0
 mamba @ file:///Users/runner/miniforge3/conda-bld/mamba-split_1711394373090/work/mamba
 MarkupSafe @ file:///Users/runner/miniforge3/conda-bld/markupsafe_1706900061465/work
 matplotlib==3.10.1
@@ -85,7 +88,8 @@ nbformat @ file:///home/conda/feedstock_root/build_artifacts/nbformat_1712238998
 nest_asyncio @ file:///home/conda/feedstock_root/build_artifacts/nest-asyncio_1705850609492/work
 networkx==3.4.2
 notebook_shim @ file:///home/conda/feedstock_root/build_artifacts/notebook-shim_1707957777232/work
-numpy==2.2.3
+numba==0.61.0
+numpy==2.1.0
 overrides @ file:///home/conda/feedstock_root/build_artifacts/overrides_1706394519472/work
 packaging==24.2
 pandas==2.2.3
@@ -125,6 +129,7 @@ rfc3986-validator @ file:///home/conda/feedstock_root/build_artifacts/rfc3986-va
 rpds-py @ file:///Users/runner/miniforge3/conda-bld/rpds-py_1707923264693/work
 ruamel.yaml @ file:///Users/runner/miniforge3/conda-bld/ruamel.yaml_1707298382103/work
 ruamel.yaml.clib @ file:///Users/runner/miniforge3/conda-bld/ruamel.yaml.clib_1707314852085/work
+scikit-learn==1.6.1
 scipy==1.15.2
 seaborn==0.13.2
 Send2Trash @ file:///Users/runner/miniforge3/conda-bld/send2trash_1712585336584/work
@@ -134,6 +139,7 @@ soupsieve @ file:///home/conda/feedstock_root/build_artifacts/soupsieve_16939292
 stack-data @ file:///home/conda/feedstock_root/build_artifacts/stack_data_1669632077133/work
 statsmodels==0.14.4
 terminado @ file:///Users/runner/miniforge3/conda-bld/terminado_1710263781917/work
+threadpoolctl==3.6.0
 tinycss2 @ file:///home/conda/feedstock_root/build_artifacts/tinycss2_1666100256010/work
 tomli==2.2.1
 tornado @ file:///Users/runner/miniforge3/conda-bld/tornado_1708363219318/work

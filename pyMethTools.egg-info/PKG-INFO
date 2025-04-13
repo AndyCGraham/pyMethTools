@@ -1,0 +1,114 @@
+Metadata-Version: 2.4
+Name: pyMethTools
+Version: 0.3.0
+Summary: A Python package for analysis of targetted methylation data
+Author-email: Andy Graham <andygraham7162@gmail.com>
+License: BSD 2-clause
+Project-URL: homepage, https://github.com/AndyCGraham/pyMethTools
+Classifier: Development Status :: 1 - Planning
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: BSD License
+Classifier: Operating System :: POSIX :: Linux
+Classifier: Programming Language :: Python :: 3.11
+Description-Content-Type: text/markdown
+Requires-Dist: aiosignal<2,>=1
+Requires-Dist: anyio<4,>=3
+Requires-Dist: appnope<1,>=0
+Requires-Dist: archspec<1,>=0
+Requires-Dist: argon2-cffi<22,>=21
+Requires-Dist: argon2-cffi-bindings<22,>=21
+Requires-Dist: arrow<2,>=1
+Requires-Dist: asttokens<3,>=2
+Requires-Dist: async-lru<2,>=1
+Requires-Dist: attrs<24,>=23
+Requires-Dist: Babel<3,>=2
+Requires-Dist: beautifulsoup4<5,>=4
+Requires-Dist: bleach<7,>=6
+Requires-Dist: boltons<24,>=23
+Requires-Dist: Brotli<2,>=1
+Requires-Dist: cached-property<2,>=1
+Requires-Dist: certifi<2024,>=2023
+Requires-Dist: cffi<2,>=1
+Requires-Dist: charset-normalizer<4,>=3
+Requires-Dist: click<9,>=8
+Requires-Dist: colorama<1,>=0
+Requires-Dist: comm<1,>=0
+Requires-Dist: contourpy<2,>=1
+Requires-Dist: cycler<1,>=0
+Requires-Dist: debugpy<2,>=1
+Requires-Dist: decorator<6,>=5
+Requires-Dist: defusedxml<1,>=0
+Requires-Dist: distro<2,>=1
+Requires-Dist: entrypoints<1,>=0
+Requires-Dist: exceptiongroup<2,>=1
+Requires-Dist: executing<2,>=1
+Requires-Dist: fastjsonschema<3,>=2
+Requires-Dist: filelock<4,>=3
+Requires-Dist: fonttools<5,>=4
+Requires-Dist: fqdn<2,>=1
+Requires-Dist: frozendict<3,>=2
+Requires-Dist: frozenlist<2,>=1
+Requires-Dist: h11<1,>=0
+Requires-Dist: h2<5,>=4
+Requires-Dist: hpack<5,>=4
+Requires-Dist: hmmlearn<1,>=0
+Requires-Dist: httpcore<1,>=0
+Requires-Dist: httpx<1,>=0
+Requires-Dist: hyperframe<7,>=6
+Requires-Dist: idna<4,>=3
+Requires-Dist: importlib_metadata<7,>=6
+Requires-Dist: importlib_resources<7,>=6
+Requires-Dist: iniconfig<3,>=2
+Requires-Dist: ipykernel<7,>=6
+Requires-Dist: ipython<9,>=8
+Requires-Dist: ipywidgets<9,>=8
+Requires-Dist: isoduration<21,>=20
+Requires-Dist: jedi<1,>=0
+Requires-Dist: Jinja2<4,>=3
+Requires-Dist: json5<1,>=0
+Requires-Dist: jsonpatch<2,>=1
+Requires-Dist: jsonpointer<3,>=2
+Requires-Dist: jsonschema<5,>=4
+Requires-Dist: jsonschema-specifications<2024,>=2023
+Requires-Dist: jupyter-events<1,>=0
+Requires-Dist: jupyter-lsp
+Requires-Dist: jupyter_client<9,>=8
+Requires-Dist: jupyter_core<6,>=5
+Requires-Dist: jupyter_server<3,>=2
+Requires-Dist: jupyter_server_terminals<1,>=0
+Requires-Dist: jupyterlab<5,>=4
+Requires-Dist: jupyterlab_pygments<1,>=0
+Requires-Dist: jupyterlab_server<3,>=2
+Requires-Dist: jupyterlab_widgets<4,>=3
+Requires-Dist: kiwisolver<2,>=1
+Requires-Dist: MarkupSafe<3,>=2
+Requires-Dist: matplotlib<4,>=3
+Requires-Dist: matplotlib-inline<1,>=0
+Requires-Dist: mistune<4,>=3
+Requires-Dist: msgpack<2,>=1
+Requires-Dist: nbclient<1,>=0
+Requires-Dist: nbconvert<8,>=7
+Requires-Dist: nbformat<6,>=5
+Requires-Dist: nest_asyncio<2,>=1
+Requires-Dist: networkx<4,>=3
+Requires-Dist: numpy<=2.1,>1
+
+# pyMethTools
+
+A package of tools utilising the beta binomial distribution, designed for analysis of targeted DNA methylation sequencing data (e.g. RRBS, Twist Biosciences) in Python. Although, this package can be applied to any methylation data which provides the number of total DNA molecules assayed at a specific position (coverage), and the number of times that position was found to be methylated.
+
+Functions include:
+- Finding regions of cpgs with similar methylation profiles, by testing if contigous genomic sites are likely to come from one (codistributed) or multiple beta binomial distributions. These regions may represent functional domains.
+- Simulating new samples, using beta binomial models fit to existing samples. A user specified number of differentially methylated sites or regions can be introduced at desired effect sizes, to facilitate tool benchmarking.
+- Differential methylation analysis of individual sites, while accounting for any covariates, using beta binomial regression.
+- Identification of differentially methylated regions.
+
+Please see [vignette](https://github.com/AndyCGraham/pyMethTools/blob/main/vignettes/vignette.ipynb) for examples of how to perform these tasks.
+
+### Installation
+```bash
+pip install git+https://github.com/AndyCGraham/pyMethTools/
+```
+
+In progress:
+- Celltype deconvolution, using the average beta values of genomic regions hypomethylated in specific celltypes.
