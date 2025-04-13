@@ -1,4 +1,5 @@
 import numpy as np
+from numba import njit
 import pandas as pd
 from pandas.api.types import is_integer_dtype
 from scipy.optimize import minimize,Bounds
@@ -15,6 +16,23 @@ import seaborn as sns
 import random
 import copy
 from pyMethTools.fit_cpg import *
+import numpy as np
+import pandas as pd
+from hmmlearn import hmm
+from pandas.api.types import is_integer_dtype
+from scipy.optimize import minimize,Bounds
+from scipy.stats import betabinom
+from scipy.special import gammaln,binom,beta,logit,expit,digamma,polygamma
+from statsmodels.stats.multitest import multipletests
+from statsmodels.genmod.families.links import Link
+from itertools import chain
+import math
+import ray
+from ray.util.multiprocessing.pool import Pool
+import matplotlib.pyplot as plt
+import seaborn as sns
+import random
+import copy
 
 class pyMethObj():
     """
@@ -171,6 +189,9 @@ class pyMethObj():
                     self.param_names_abd,self.param_names_disp,self.link,
                     self.fit_method, self.sample_weights) 
                               for chunk in range(0,len(set(self.individual_regions))+1,chunksize)]))
+                
+                self.fits = list(chain.from_iterable(self.fits))
+                self.se = list(chain.from_iterable(self.se))
              
             else:
                 self.fits,self.se = zip(*ray.get([self.fit_region.remote(self.region_cpg_indices[self.target_regions==region],
@@ -184,8 +205,6 @@ class pyMethObj():
         else:
             self.fits,self.se = zip(*[self.fit_region_local(cpgs,region,start_params) for region in self.individual_regions])
 
-        # self.fits = list(chain.from_iterable(self.fits))
-        # self.se = list(chain.from_iterable(self.se))
 
     @staticmethod
     @ray.remote
@@ -268,7 +287,7 @@ class pyMethObj():
         return fits,se
     
     @staticmethod
-    def fit_cpg_internal(cpg,meth,coverage,X,X_star,maxiter=150,maxfev=150,start_params=[],param_names_abd=["intercept"],param_names_disp=["intercept"],
+    def fit_cpg_internal(meth,coverage,X,X_star,maxiter=150,maxfev=150,start_params=[],param_names_abd=["intercept"],param_names_disp=["intercept"],
                 link="arcsin",fit_method="gls",sample_weights=None):
         """
         Perform differential methylation analysis on a single cpg using beta binomial regression.
@@ -288,8 +307,8 @@ class pyMethObj():
             pandas dataframe: Dataframe containing estimates of coeficents for the cpg. 
         """
         cc = Corncob_2(
-                    total=coverage[cpg],
-                    count=meth[cpg],
+                    total=coverage,
+                    count=meth,
                     X=X,
                     X_star=X_star,
                     param_names_abd=param_names_abd,
@@ -502,8 +521,8 @@ class pyMethObj():
         beta = normalized_weights @ beta
         return beta
     
-    def wald_test(self, coef, padjust_method='fdr_bh', n_permute=1, find_dmrs=True, prop_sig=0.5, 
-                  fdr_thresh=0.05, max_gap=1000, min_cpgs=3, ncpu=1):
+    def wald_test(self, coef, padjust_method='fdr_bh', n_permute=1, find_dmrs='HMM', prop_sig=0.5, 
+                  fdr_thresh=0.05, max_gap=1000, min_cpgs=3, n_states=3, state_labels=None, ncpu=1):
         if isinstance(coef, str):
             try:
                 coef_idx = self.param_names_abd == coef
@@ -540,7 +559,7 @@ class pyMethObj():
             res["emp_pvals"] = emp_pval
             res["emp_fdrs"] = multipletests(emp_pval, method=padjust_method)[1]
             
-        if find_dmrs:
+        if find_dmrs == 'binary_search':
             dmr_res = self.find_significant_regions(res,prop_sig=prop_sig,fdr_thresh=fdr_thresh,max_gap=max_gap)
             if n_permute > 1:
                 permuted_dmrs = []
@@ -572,24 +591,33 @@ class pyMethObj():
                 dmr_res["emp_fdrs"] = multipletests(emp_pval, method=padjust_method)[1]
 
             return res, dmr_res
+        
+        elif find_dmrs == 'HMM':
+            dmr_res = self.find_significant_regions_HMM(res, n_states=n_states, min_cpgs=min_cpgs, fdr_thresh=fdr_thresh, 
+                                                        prop_sig_thresh=prop_sig, state_labels=state_labels, 
+                                                        hmm_plots=False, hmm_internals=False)
+            return res, dmr_res
 
         else:
             return res
     
     @staticmethod
-    def find_significant_regions(df, prop_sig=0.5, fdr_thresh=0.05, max_gap=1000, min_cpgs=3):
+    def find_significant_regions(df, prop_sig=0.5, fdr_thresh=0.05, maxthresh=0.2, max_gap=1000, min_cpgs=3):
         """
         Find regions of adjacent CpGs where:
         - The gap between successive CpGs is less than max_gap,
         - The overall proportion of CpGs with fdr < fdr_thresh is >= prop_sig,
-        - And both the first and last CpG in the region are significant (fdr < fdr_thresh).
+        - The last CpG in the region is significant (fdr < fdr_thresh),
+        - And the region ends if a CpG has fdr > maxthresh.
 
         Parameters:
             df (pd.DataFrame): DataFrame with columns 'chr', 'pos', and 'fdrs'.
             max_gap (int): Maximum allowed gap between adjacent CpGs.
             prop_sig (float): Minimum proportion of CpGs in a region that must have fdr < fdr_thresh.
             fdr_thresh (float): FDR threshold for significance.
-            
+            maxthresh (float): FDR threshold above which a region will end.
+            min_cpgs (int): Minimum number of CpGs required in a region.
+
         Returns:
             pd.DataFrame: DataFrame with columns 'chr', 'start', 'end', 'num_cpgs',
                         'num_sig_cpgs', and 'prop_sig_cpgs' for each region.
@@ -604,7 +632,7 @@ class pyMethObj():
             chr_df = group.reset_index(drop=True)
             positions = chr_df['pos'].to_numpy()
             # Binary significance indicator: 1 if fdr < fdr_thresh, 0 otherwise.
-            sig = (chr_df['fdrs'] < fdr_thresh).astype(int).to_numpy()
+            sig = (chr_df['fdrs'] <= fdr_thresh).astype(int).to_numpy()
             n = len(chr_df)
             used_cpgs = set()  # For this chromosome only.
 
@@ -619,6 +647,9 @@ class pyMethObj():
                 start_idx = i
                 end_idx = i
                 while end_idx + 1 < n and (positions[end_idx + 1] - positions[end_idx] <= max_gap):
+                    # Stop the region if the FDR exceeds maxthresh.
+                    if chr_df['fdrs'].iloc[end_idx + 1] > maxthresh:
+                        break
                     end_idx += 1
                     if end_idx in used_cpgs:
                         break
@@ -664,6 +695,181 @@ class pyMethObj():
 
         return pd.DataFrame(significant_regions)
     
+    @staticmethod
+    def find_significant_regions_HMM(cpg_res, n_states=3, min_cpgs=5, fdr_thresh=0.05, prop_sig_thresh=0.5, 
+                                 state_labels=None, hmm_plots=False, hmm_internals=False):
+        """
+        Identify candidate DMR regions using an HMM with multiple states and multivariate features.
+        
+        The function uses two observed features per CpG site: for instance, 
+        'score1' (e.g., –log10(p-value)) and 'score2' (e.g., a test statistic). 
+        An HMM is applied per chromosome to decode the state at each CpG; contiguous CpGs 
+        in a non-background state (e.g., hyper- or hypomethylated) are merged into candidate regions.
+        
+        Parameters
+        ----------
+        cpg_res : pd.DataFrame
+            Must contain the following columns:
+            - 'chr': Chromosome identifier
+            - 'pos': Genomic position
+            - 'pvals': CpG pvalue
+            - 'fdrs': CpG fdrs
+            - 'stat': CpG Test Statistic
+        n_states : int, default 3
+            Number of HMM states. Here we assume:
+            0: Background,
+            1: Hypermethylated DMR,
+            2: Hypomethylated DMR.
+        min_cpgs : int, default 3
+            Minimum number of consecutive CpGs to report a region.
+        state_labels : dict or None
+            Optional mapping from state index to state name. If None, defaults are:
+            {0: 'Background', 1: 'Hypermethylated', 2: 'Hypomethylated'}.
+        hmm_plots : bool, default False
+            Whether to generate plots for HMM state decoding.
+        hmm_internals : bool, default False
+            Whether to print internal HMM parameters (e.g., means, transition probabilities).
+        
+        Returns
+        -------
+        regions_df : pd.DataFrame
+            Candidate regions with columns:
+            - 'chr': Chromosome
+            - 'start': Starting position of the region (first CpG)
+            - 'end': Ending position of the region (last CpG)
+            - 'num_cpgs': Number of CpGs in the region
+            - 'state': The region state ('Hypermethylated' or 'Hypomethylated')
+        """
+        if state_labels is None:
+            state_labels = {0: 'Background', 1: 'Hypermethylated', 2: 'Hypomethylated'}
+        
+        candidate_regions = []
+
+        cpg_res['-log10pval'] = -np.log10(cpg_res['pvals'])
+        
+        # Process each chromosome separately.
+        for chrom, group in cpg_res.groupby('chr'):
+            group = group.sort_values('pos').reset_index(drop=True)
+            # Create observations array with both score1 and score2.
+            obs = group[['-log10pval', 'stat']].values  # shape: (n_samples, 2)
+            
+            # Initialize a Gaussian HMM with three states and diagonal covariance.
+            model = hmm.GaussianHMM(n_components=n_states, covariance_type="diag", n_iter=100, random_state=42, init_params="c")
+
+            model.transmat_ = np.array([
+                [0.9999, 0.00005, 0.00005],  # From background
+                [0.005, 0.99, 0.005],          # From hyper
+                [0.005, 0.005, 0.99]           # From hypo
+            ])
+            
+            # Initialize means. Adjust these based on your data.
+            # Background state: score1 ~ 0.5 (low significance), score2 near 0.
+            # Hypermethylated: high score1 and positive test statistic.
+            # Hypomethylated: high score1 and negative test statistic.
+            model.means_ = np.array([
+                [0, 0.0],    # State 0: Background 
+                [3.0, 3.0],   # State 1: Hypermethylated 
+                [3.0, -3.0]   # State 2: Hypomethylated
+            ])
+            # Initialize diagonal covariances; these can be tuned:
+            model.covars_ = np.tile(np.array([1.0, 1.0]), (n_states, 1))
+            
+            # Fit the HMM to the observations using Baum-Welch:
+            model.fit(obs)
+            
+            # Decode the most likely state sequence:
+            state_seq = model.predict(obs)
+            group['state'] = state_seq
+            
+            # (Optional) Plot for inspection:
+            if hmm_plots:
+                plt.figure(figsize=(10, 4))
+                plt.plot(group['pos'], group['-log10pval'], 'o-', label='score1 (-log10 pvalue)')
+                plt.plot(group['pos'], group['stat'], 'o-', label='score2 (test statistic)', alpha=0.7)
+                plt.step(group['pos'], state_seq, where='mid', label='Decoded State', color='black')
+                plt.xlabel('Genomic Position')
+                plt.ylabel('Score / State')
+                plt.legend()
+                plt.title(f"Chromosome {chrom} Observations and Decoded State")
+                plt.show()
+
+            if hmm_internals:
+                print("hmm state means:\n", model.means_)
+                print("hmm state transition probabilities:\n", model.transmat_)
+
+            # Extract contiguous segments that are in a DMR state (states 1 and 2).
+            current_region = None
+            for i, row in group.iterrows():
+                st = row['state']
+                if st != 0:  # non-background state
+                    if current_region is None:
+                        current_region = {
+                            'chr': chrom,
+                            'start_idx': i,
+                            'end_idx': i,
+                            'state': st  # record the state for current contiguous block
+                        }
+                    else:
+                        if st == current_region['state']:
+                            current_region['end_idx'] = i
+                        else:
+                            # End the current region and start a new one if it's long enough.
+                            if (current_region['end_idx'] - current_region['start_idx'] + 1) >= min_cpgs:
+                                start_pos = group.loc[current_region['start_idx'], 'pos']
+                                end_pos = group.loc[current_region['end_idx'], 'pos']
+                                candidate_regions.append({
+                                    'chr': chrom,
+                                    'start': start_pos,
+                                    'end': end_pos,
+                                    'num_cpgs': current_region['end_idx'] - current_region['start_idx'] + 1,
+                                    'num_sig': (cpg_res.loc[(cpg_res.chr == chrom) &
+                                                            (cpg_res.pos >= start_pos) &
+                                                            (cpg_res.pos <= end_pos), 'fdrs'] <= fdr_thresh).sum(),
+                                    'state': state_labels[current_region['state']]
+                                })
+                            current_region = {
+                                'chr': chrom,
+                                'start_idx': i,
+                                'end_idx': i,
+                                'state': st
+                            }
+                else:
+                    if current_region is not None:
+                        if (current_region['end_idx'] - current_region['start_idx'] + 1) >= min_cpgs:
+                            start_pos = group.loc[current_region['start_idx'], 'pos']
+                            end_pos = group.loc[current_region['end_idx'], 'pos']
+                            candidate_regions.append({
+                                'chr': chrom,
+                                'start': start_pos,
+                                'end': end_pos,
+                                'num_cpgs': current_region['end_idx'] - current_region['start_idx'] + 1,
+                                'num_sig': (cpg_res.loc[(cpg_res.chr == chrom) &
+                                                        (cpg_res.pos >= start_pos) &
+                                                        (cpg_res.pos <= end_pos), 'fdrs'] <= fdr_thresh).sum(),
+                                'state': state_labels[current_region['state']]
+                            })
+                        current_region = None
+
+            # Check if a region remains at the end:
+            if current_region is not None and (current_region['end_idx'] - current_region['start_idx'] + 1) >= min_cpgs:
+                start_pos = group.loc[current_region['start_idx'], 'pos']
+                end_pos = group.loc[current_region['end_idx'], 'pos']
+                candidate_regions.append({
+                    'chr': chrom,
+                    'start': start_pos,
+                    'end': end_pos,
+                    'num_cpgs': current_region['end_idx'] - current_region['start_idx'] + 1,
+                    'num_sig': (cpg_res.loc[(cpg_res.chr == chrom) &
+                                            (cpg_res.pos >= start_pos) &
+                                            (cpg_res.pos <= end_pos), 'fdrs'] <= fdr_thresh).sum(),
+                    'state': state_labels[current_region['state']]
+                })
+        
+        region_res = pd.DataFrame(candidate_regions)
+        region_res['prop_sig'] = region_res['num_sig'] / region_res['num_cpgs']
+        region_res = region_res[region_res['prop_sig'] >= prop_sig_thresh]
+        return region_res
+
     def permute_and_refit(self, coef, N=100, padjust_method='fdr_bh', ncpu=1):
         """
         Refit the beta-binomial regression model and compute Wald test statistics N times,
@@ -734,18 +940,18 @@ class pyMethObj():
             ray.init(num_cpus=ncpu)
         
             if chunksize > 1:
-                codistrib_regions = zip(*ray.get([self.find_codistrib_chunk.remote(
+                codistrib_regions = ray.get([self.find_codistrib_chunk.remote(
                     self.target_regions[np.isin(self.target_regions,self.individual_regions[chunk:chunk+chunksize])],
                     self.find_codistrib_local,self.beta_binomial_log_likelihood,self.unique,
                     self.fits[chunk:chunk+chunksize],
                     self.meth[np.isin(self.target_regions,self.individual_regions[chunk:chunk+chunksize])],
                     self.coverage[np.isin(self.target_regions,self.individual_regions[chunk:chunk+chunksize])],
                     self.X,self.X_star,min_cpgs,maxiter,maxfev,self.param_names_abd,self.param_names_disp,self.link)
-                    for chunk in range(0,len(set(self.individual_regions))+1,chunksize)]))
+                    for chunk in range(0,len(set(self.individual_regions))+1,chunksize)])
             else:
-                codistrib_regions = zip(*ray.get([self.find_codistrib.remote(region,self.beta_binomial_log_likelihood,self.fits[fit],self.meth[self.target_regions==region],self.coverage[self.target_regions==region],
+                codistrib_regions = ray.get([self.find_codistrib.remote(region,self.beta_binomial_log_likelihood,self.fits[fit],self.meth[self.target_regions==region],self.coverage[self.target_regions==region],
                                                                                 self.X,self.X_star,min_cpgs,self.param_names_abd,self.param_names_disp,maxiter,maxfev,self.link) 
-                                                    for fit,region in enumerate(self.individual_regions)]))
+                                                    for fit,region in enumerate(self.individual_regions)])
             ray.shutdown()
             
             self.codistrib_regions = np.hstack(codistrib_regions)
@@ -776,11 +982,11 @@ class pyMethObj():
         Returns:
             numpy array: Array of optimisation results of length equal to the number of cpgs in this chunk. 
         """
-        codistrib_regions = zip(*[find_codistrib(region,beta_binomial_log_likelihood,fits[fit],
+        codistrib_regions = [find_codistrib(region,beta_binomial_log_likelihood,fits[fit],
                                                  meth[region_id==region],coverage[region_id==region],
                                                  X_id,X_star_id,min_cpgs,param_names_abd,param_names_disp,
                                                  maxiter,maxfev,link) 
-                                                   for fit,region in enumerate(unique(region_id))])
+                                                   for fit,region in enumerate(unique(region_id))]
         
         codistrib_regions = np.hstack(codistrib_regions)
         
@@ -807,11 +1013,14 @@ class pyMethObj():
         n_params_abd=X.shape[1]
         n_params_disp=X_star.shape[1]
         n_samples = X.shape[0]
-        n_params=n_params_abd+n_params_disp
+        n_params=2
         bad_cpgs=0    
-        X=X
-        X_c=X
-        X_star_c=X_star
+        X=X[:,[0]]
+        X_c=X[:,[0]]
+        X_star_c=X_star[:,[0]]
+        fits = fits[:,[0,n_params_abd]] # Subset fits to only intercepts (mean abundance and dispersion)
+        n_params_abd=1
+        n_params_disp=1
         ll_c = beta_binomial_log_likelihood(meth[start],coverage[start],X,X_star,fits[start],n_params_abd,n_params_disp,link=link)
         
         while end < len(fits)+1:
@@ -824,8 +1033,8 @@ class pyMethObj():
                 ll_c = beta_binomial_log_likelihood(meth[start:end].flatten(),coverage[start:end].flatten(),X_c,X_star_c,
                                                     fits[start],n_params_abd,n_params_disp,link=link) 
     
-                bic_c = -2 * ll_c + (n_params) * np.log(n_samples*2) 
-                bic_s = -2 * ll_s + (n_params*2) * np.log(n_samples*2) 
+                bic_c = -2 * ll_c + (n_params) * np.log(n_samples) 
+                bic_s = -2 * ll_s + (n_params*3) * np.log(n_samples) 
                 end += 1
     
         #If sites come from the same distribution, keep extending the region, else start a new region
@@ -837,7 +1046,7 @@ class pyMethObj():
                     start=end-2
                     X_c=X
                     X_star_c=X_star
-                    ll_c=beta_binomial_log_likelihood(meth[start],coverage[start], X,X_star,fits[start],n_params_abd,
+                    ll_c=beta_binomial_log_likelihood(meth[start],coverage[start],X,X_star,fits[start],n_params_abd,
                                                       n_params_disp,link=link)
                     
                 else:
@@ -875,11 +1084,14 @@ class pyMethObj():
         n_params_abd=X.shape[1]
         n_params_disp=X_star.shape[1]
         n_samples = X.shape[0]
-        n_params=n_params_abd+n_params_disp
+        n_params=2
         bad_cpgs=0    
-        X = X
-        X_c=X
-        X_star_c=X_star
+        X=X[:,[0]]
+        X_c=X[:,[0]]
+        X_star_c=X_star[:,[0]]
+        fits = fits[:,[0,n_params_abd]] # Subset fits to only intercepts (mean abundance and dispersion)
+        n_params_abd=1
+        n_params_disp=1
         ll_c = beta_binomial_log_likelihood(meth[start],coverage[start], X,X_star,fits[start],n_params_abd,n_params_disp,link=link)
         
         while end < len(fits)+1:
@@ -892,8 +1104,8 @@ class pyMethObj():
                 ll_c = beta_binomial_log_likelihood(meth[start:end].flatten(),coverage[start:end].flatten(),X_c,X_star_c,
                                                     fits[start],n_params_abd,n_params_disp,link=link) 
     
-                bic_c = -2 * ll_c + (n_params) * np.log(n_samples*2) 
-                bic_s = -2 * ll_s + (n_params*2) * np.log(n_samples*2) 
+                bic_c = -2 * ll_c + (n_params) * np.log(n_samples) 
+                bic_s = -2 * ll_s + (n_params*3) * np.log(n_samples) 
                 end += 1
     
         #If sites come from the same distribution, keep extending the region, else start a new region
@@ -972,6 +1184,66 @@ class pyMethObj():
 
         return log_likelihood
 
+    @njit
+    def find_subregions(self, coef,  tol=0.05, max_dist=10000, start_group=0):
+        """
+        Return an array of segment labels for x such that:
+        - Normally, a new segment is started when the value differs from the current baseline or 
+            the previous value by more than tol.
+        - If a single value exceeds tol but the immediately following value is within tol of the current baseline,
+            the outlier is given a group on its own and the segment continues.
+        
+        Parameters
+        ----------
+        coef : Name of coeficient to find subregions for (in self.param_names_abd)
+        tol : numeric threshold for allowed deviation from the group's baseline and previous value.
+        
+        Returns
+        -------
+        labels : 1D numpy array of int64 group labels.
+        """
+        if isinstance(coef, str):
+            try:
+                coef_idx = self.param_names_abd == coef
+            except ValueError:
+                raise ValueError(f"Can't find coef: {coef}. Make sure it matches a column name in design matrix.")
+
+        # Extract coef values
+        x = np.vstack(self.fits)[:,:self.n_param_abd][:, coef_idx].flatten()
+        labels = np.repeat(-1, self.ncpgs).astype(np.int64)
+        group = start_group
+        baseline = x[0]
+        labels[0] = group
+        outliers=0
+        for i in range(1, n):
+            if labels[i] != -1: # Skip if already marked as part of a group.
+                continue
+            if (self.chr[i] != self.chr[i-1]) or (self.genomic_positions[i] - self.genomic_positions[i-1] > max_dist): # Start new group if new chromosome or more than max dist apart
+                group += 1+outliers
+                baseline = x[i]
+                labels[i] = group
+                outliers=0
+                continue
+            # Check if current value is within tol of the current baseline.
+            if (np.abs(x[i] - baseline) <= tol) and (np.abs(x[i] - x[i-1]) <= tol):
+                labels[i] = group
+            else:
+                # The current value is "far" from the baseline.
+                # Check if it's an isolated outlier: if the next value exists and is within tol of the baseline.
+                if (i < self.ncpgs - 1) and (np.abs(x[i+1] - baseline) <= tol) and (np.abs(x[i+1] - x[i-1]) <= tol):
+                    # Mark this value as an isolated outlier.
+                    labels[i] = group+1+outliers
+                    labels[i+1] = group
+                    outliers+=1
+                    # Do not update baseline or group.
+                else:
+                    # Otherwise, treat this as a true group break:
+                    group += 1+outliers
+                    baseline = x[i]
+                    labels[i] = group
+                    outliers=0
+        return labels
+
     def sim_multiple_cpgs(self,covs=None,covs_disp=None,use_codistrib_regions: bool=True,read_depth: str|int|np.ndarray="from_data",vary_read_depth=True,read_depth_sd: str|int|float|np.ndarray="from_data",
                           adjust_factor: float|list=0, diff_regions_up: list|np.ndarray=[],diff_regions_down: list|np.ndarray=[],n_diff_regions: list|int=0,prop_pos: float=0.5,
                           sample_size: int=100,ncpu: int=1,chunksize=1):
@@ -1009,8 +1281,10 @@ class pyMethObj():
         assert len(self.fits) == len(self.individual_regions), "Run fit before simulating"
         if not isinstance(read_depth,np.ndarray):
             assert any([read_depth == "from_data", isinstance(read_depth,(list,int))]), "read_depth must be 'from_data' or a positive integer"
-        if isinstance(read_depth,(list,int)):
+        if isinstance(read_depth,(list)):
             assert all(read_depth>0) , "read_depth must be a positive integer"
+        if isinstance(read_depth,(int)):
+            assert read_depth>0, "read_depth must be a positive integer"
         if not isinstance(read_depth,np.ndarray):
             assert any([read_depth_sd == "from_data", isinstance(read_depth_sd,(list,float,int))]), "read_depth_sd must be 'from_data' or a positive integer or float"
         if isinstance(read_depth_sd,(list,int)):
@@ -1329,8 +1603,6 @@ class pyMethObj():
         # except:
         #     raise ValueError("Parameters are not compatible with the beta binomial model. Likely adjust_factor is too high or something went wrong during fitting.")
         return meth, coverage
-
-    def get_contrast(self,res: str="cpg",contrast: str="intercept",alpha=0.05,padj_method="fdr_bh"):
         """
         Gets results for one contrast and corrects for multiple testing.
     
