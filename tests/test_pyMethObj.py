@@ -117,38 +117,38 @@ def fitted_obj(sample_data):
     obj = pyMethObj(meth, coverage, target_regions, genomic_positions, covs=covs, covs_disp=covs_disp)
     # Predefine fits for testing
     obj.fits = [
-    np.array([[ 7.92886322e-01,  1.25959074e-02,  1.00000000e-15],
-            [ 2.01046223e-01,  2.12963479e-01,  1.00000000e-15],
-            [ 1.74930051e-01,  2.34600036e-01,  1.00000000e-15],
-            [ 2.05591731e-01,  2.43891601e-01,  1.00000000e-15],
-            [ 7.65952286e-01, -1.20519681e-02,  1.00000000e-15]]),
-    np.array([[ 1.32184021e+00, -4.11999233e-02,  1.00000000e-15],
-            [ 2.90850673e-01, -5.85198271e-02,  1.00000000e-15],
-            [ 2.70992165e-01,  1.72875207e-02,  1.00000000e-15],
-            [ 3.14645981e-01,  2.61748915e-03,  1.00000000e-15],
-            [ 1.11590907e+00,  1.27013657e-03,  1.00000000e-15]]),
-    np.array([[ 8.64444799e-01,  1.08287909e-02,  1.00000000e-15],
-            [ 3.22801695e-01,  1.63522972e-01,  1.00000000e-15],
-            [ 3.17690976e-01,  1.96341136e-01,  1.00000000e-15],
-            [ 3.00396400e-01,  1.92360772e-01,  1.00000000e-15],
-            [ 8.41474308e-01, -2.73828372e-02,  1.00000000e-15]])             
-            ]
+        np.array([[ 1.48766082e-02,  2.50060911e-02,  1.00000000e-03],
+                [-1.14103882e+00,  4.05076763e-01,  1.00000000e-03],
+                [-1.17978006e+00,  4.34720649e-01,  1.00000000e-03],
+                [-1.12041881e+00,  4.54351022e-01,  1.64927128e-02],
+                [-3.86325151e-02, -2.39180880e-02,  1.00000000e-03]]),
+        np.array([[ 1.04139772e+00, -6.92534017e-02,  2.29919707e-02],
+                [-9.78610373e-01, -1.01156417e-01,  1.00000000e-03],
+                [-1.01659484e+00,  4.02800518e-02,  4.10399823e-03],
+                [-9.18178580e-01, -6.83324802e-03,  2.58301085e-02],
+                [ 6.55694947e-01,  1.81249577e-03,  1.24740026e-02]]),
+        np.array([[ 0.15700991,  0.02147223,  0.001     ],
+                [-0.91570054,  0.32316257,  0.01006974],
+                [-0.92535738,  0.38697274,  0.001     ],
+                [-0.95906197,  0.37850852,  0.001     ],
+                [ 0.11138074, -0.05443436,  0.001     ]])
+    ]
     obj.se = [
-    np.array([[0.04761905, 0.067733  ],
-        [0.04761905, 0.067733  ],
-        [0.04761905, 0.067733  ],
-        [0.04761905, 0.067733  ],
-        [0.04761905, 0.067733  ]]),
-    np.array([[0.04761905, 0.067733  ],
-            [0.04761905, 0.067733  ],
-            [0.04761905, 0.067733  ],
-            [0.04761905, 0.067733  ],
-            [0.04761905, 0.067733  ]]),
-    np.array([[0.04761905, 0.06785295],
-            [0.04761905, 0.06785295],
-            [0.04761905, 0.06785295],
-            [0.04761905, 0.06785295],
-            [0.04761905, 0.06785295]])
+        np.array([[0.04829079, 0.06867721],
+                [0.04829079, 0.06867721],
+                [0.04829079, 0.06867721],
+                [0.05770623, 0.0819252 ],
+                [0.04829079, 0.06867721]]),
+        np.array([[0.06122605, 0.08688458],
+                [0.04829079, 0.06867736],
+                [0.05031871, 0.07152911],
+                [0.06270111, 0.08896291],
+                [0.05541796, 0.07870474]]),
+        np.array([[0.04829079, 0.06879558],
+                [0.05400259, 0.07681752],
+                [0.04829079, 0.06879558],
+                [0.04829079, 0.06879558],
+                [0.04829079, 0.06879558]])
     ]
     obj.link = "arcsin"
     obj.fit_method = "gls"
@@ -172,13 +172,13 @@ def test_fit_betabinom(sample_data):
     assert len(obj.fits) == len(obj.individual_regions)
 
 def test_fit_cpg_local(fitted_obj):
-    result,se = fitted_obj.fit_cpg_local(0)
+    result,se = fitted_obj.fit_cpg_local(fitted_obj.X,0)
     assert result is not None
     assert len(result) == fitted_obj.X.shape[1] + fitted_obj.X_star.shape[1]
 
 def test_fit_region_local(fitted_obj):
     cpgs=np.array(range(fitted_obj.ncpgs))
-    result = fitted_obj.fit_region_local(cpgs, 1)
+    result = fitted_obj.fit_region_local(fitted_obj.X, cpgs, 1)
     assert result is not None
     assert len(result[0]) == 5  # fits and se
     assert len(result[0][0]) == fitted_obj.X.shape[1] + fitted_obj.X_star.shape[1]
@@ -190,10 +190,10 @@ def test_smooth(fitted_obj):
 
 def test_wald_test(fitted_obj):
     cpg_res,region_res = fitted_obj.wald_test('cov1')
-    assert 'pvals' in cpg_res.columns
-    assert 'fdrs' in cpg_res.columns
+    assert 'pval' in cpg_res.columns
+    assert 'fdr' in cpg_res.columns
     assert len(cpg_res) == fitted_obj.ncpgs
-    assert all(cpg_res.loc[cpg_res.fdrs < 0.05,"pos"] == [650,1100,1550,5150,5600,6050])
+    assert all(cpg_res.loc[cpg_res.fdr < 0.05,"pos"] == [650,1100,1550,5150,5600,6050])
     assert 'chr' in region_res.columns
     assert 'start' in region_res.columns
     assert 'end' in region_res.columns
@@ -206,8 +206,8 @@ def test_wald_test(fitted_obj):
 def test_permute_and_refit(fitted_obj):
     result = fitted_obj.permute_and_refit('cov1', N=10)
     assert 'stats' in result
-    assert 'pvals' in result
-    assert 'fdrs' in result
+    assert 'pval' in result
+    assert 'fdr' in result
     assert result['stats'].shape[1] == 10  # N permutations
 
 def test_find_codistrib_regions(fitted_obj):
