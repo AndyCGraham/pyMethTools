@@ -198,7 +198,7 @@ def test_wald_test(fitted_obj):
     assert 'start' in region_res.columns
     assert 'end' in region_res.columns
     assert 'num_cpgs' in region_res.columns
-    assert 'num_sig' in region_res.columns
+    assert 'num_sig_cpgs' in region_res.columns
     assert len(region_res) == 2
     assert all(region_res["start"] == [650,5150])
     assert all(region_res["end"] == [1550,6050])

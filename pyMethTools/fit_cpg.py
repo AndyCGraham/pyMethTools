@@ -1,4 +1,5 @@
 from statsmodels.stats.multitest import multipletests
+from statsmodels.tools.sm_exceptions import PerfectSeparationWarning
 from statsmodels.genmod.families.links import Link
 import pandas as pd
 import numpy as np
@@ -84,6 +85,11 @@ class Corncob_2():
         def inverse(self, z):
             """Inverse of the link function"""
             return np.sin(z)**2
+        
+        def deriv(self, p):
+            """Derivative of the link function: g'(p) = 1/(2*sqrt(p*(1-p)))"""
+            p = self._clean(p)
+            return 1.0/(2.0*np.sqrt(p*(1-p)))
     
         def inverse_deriv(self, z):
             """Derivative of the inverse link function"""
@@ -103,7 +109,7 @@ class Corncob_2():
                     self.total - self.count, # Failures
                 ]).T,
                 exog=self.X,
-                family=sm.families.Binomial(link=link_function)
+                family=sm.families.Binomial(link=link_function,check_link=False)
             ).fit()       
         else: 
             m = sm.GLM(
@@ -114,8 +120,10 @@ class Corncob_2():
                 exog=self.X,
                 family=sm.families.Binomial(link=link_function)
             ).fit() 
+        
+        dispersion_est = np.sum(m.resid_pearson**2) / m.df_resid
         return(
-            list(m.params) + ([np.arcsin(self.phi_init)] * self.n_param_disp)
+            list(m.params) + ([np.arcsin(np.sqrt(dispersion_est))] * self.n_param_disp)
         )
 
     @staticmethod
@@ -234,146 +242,117 @@ class Corncob_2():
     
         return Hessian
     
-    def gls(self, c1=1e-100):
+    def gls(self, c1=0.001):
         """
-        Fits a single CpG model using a two-stage weighted least squares procedure with optional sample weights.
-        
-        This method uses the following attributes from the object:
-        - self.count         : methylated counts
-        - self.total         : coverage counts
-        - self.X             : design matrix 
-        - self.Z             : transformed methylation levels
-        - self.n_samples     : number of samples 
-        - self.n_param_abd   : number of parameters 
-        - self.sample_weights     : optional array of sample-specific weights (default: None, which means equal weights)
-        - c1                 : small constant to bound phi away from 0 and 1 (default: 1e-10)
-        
-        Returns:
-        An OptimizeResult-like object with attributes:
-            x         : estimated regression coefficients (beta0+phi),
-            fun       : the estimated dispersion (phi),
-            se_beta0  : standard errors of the regression coefficients,
-            var_beta0 : flattened variance-covariance matrix,
-            phi       : dispersion estimate,
-            success   : True if completed successfully,
-            message   : a string message.
-        Returns None if there is insufficient data or the design matrix is singular.
+        Fits the model using a two-stage weighted least squares procedure.
         """
-        # Use only indices where self.total > 0.
+        # Subset non-missing samples where total > 0.
         ix = self.total > 0
         if np.mean(ix) < 1:
-            # Subset the data to non-missing entries.
             X = self.X[ix, :]
             count = self.count[ix]
             total = self.total[ix]
             Z = self.Z[ix]
-            # If sample weights provided, subset those too
-            if self.sample_weights is not None:
-                self.sample_weights = self.sample_weights[ix]
-                
-            # Check that there are enough degrees of freedom for regression.
+            sample_weights = self.sample_weights[ix] if self.sample_weights is not None else np.ones_like(total)
             if X.shape[0] < X.shape[1] + 1:
-                result = OptimizeResult()
-                result.x = np.repeat(np.nan,X.shape[1]+1)   # estimated coefficients
-                result.se_beta0 = np.nan
-                result.var_beta0 = np.nan
-                result.success = False
-                result.message = "Not enough degrees of freedom. Require more samples than parameters."
-                return result
-            
-            # Check that the design matrix is full rank.
+                res = OptimizeResult()
+                res.x = np.repeat(np.nan, X.shape[1] + 1)
+                res.se_beta0 = np.nan
+                res.var_beta0 = np.nan
+                res.success = False
+                res.message = "Not enough degrees of freedom. Require more samples than parameters."
+                return res
+            # Check full rank.
             U, s, Vt = np.linalg.svd(X)
             if np.any(np.abs(s) < 1e-10):
-                result = OptimizeResult()
-                result.x = np.repeat(np.nan,X.shape[1]+1)   # estimated coefficients
-                result.se_beta0 = np.nan
-                result.var_beta0 = np.nan
-                result.success = False
-                result.message = "Design matrix is not full rank"
-                return result
+                res = OptimizeResult()
+                res.x = np.repeat(np.nan, X.shape[1] + 1)
+                res.se_beta0 = np.nan
+                res.var_beta0 = np.nan
+                res.success = False
+                res.message = "Design matrix is not full rank"
+                return res
         else:
-            # If no missing entries, use the full data.
             X = self.X
             count = self.count
             total = self.total
             Z = self.Z
-        
-        # Update the number of samples based on the (possibly subset) data.
+            sample_weights = self.sample_weights if self.sample_weights is not None else np.ones_like(total)
+
+        # Update sample count and parameter count.
         n_samples = X.shape[0]
         p = self.n_param_abd
 
         # --- First round of weighted least squares ---
-        # Combine coverage weights with sample weights
-        combined_weights = total * self.sample_weights
+        combined_weights = total * sample_weights
         XTVinv = (X * combined_weights[:, np.newaxis]).T
         XtX = np.dot(XTVinv, X)
         try:
             beta0 = np.linalg.solve(XtX, np.dot(XTVinv, Z))
         except np.linalg.LinAlgError:
-            result = OptimizeResult()
-            result.x = np.repeat(np.nan,X.shape[1]+1)   # estimated coefficients
-            result.se_beta0 = np.nan
-            result.var_beta0 = np.nan
-            result.success = False
-            result.message = "Unable to compute covariance matrix."
-            return result
+            res = OptimizeResult()
+            res.x = np.repeat(np.nan, X.shape[1] + 1)
+            res.se_beta0 = np.nan
+            res.var_beta0 = np.nan
+            res.success = False
+            res.message = "Unable to solve for beta0 (first round)."
+            return res
 
-        # --- Compute dispersion estimate ---
-        # Compute residuals: Z - X @ beta0
+        # --- Estimate dispersion (phiHat) ---
         residual = Z - np.dot(X, beta0)
-        # Compute phiHat with sample weights incorporated
         weighted_sum_sq = np.sum((residual**2) * combined_weights)
-        weighted_sum = np.sum(combined_weights)
-        effective_df = np.sum(self.sample_weights) - p
-        phiHat = (weighted_sum_sq - effective_df) * np.sum(self.sample_weights) / effective_df / np.sum((total - 1) * self.sample_weights)
+        effective_df = np.sum(sample_weights) - p
+        phiHat = (weighted_sum_sq - effective_df) * np.sum(sample_weights) / (effective_df * np.sum((total - 1) * sample_weights))
         phiHat = np.clip(phiHat, c1, 1 - c1)
-        
-        # --- Second round of regression ---
-        # Define new weights based on phiHat and sample weights
-        Vinv = self.sample_weights * total / (1 + (total - 1) * phiHat)
+
+        # --- Second round regression with updated weights ---
+        # Define new weights based on phiHat.
+        Vinv = sample_weights * total / (1 + (total - 1) * phiHat)
         XTVinv = (X * Vinv[:, np.newaxis]).T
         XtX = np.dot(XTVinv, X)
         try:
-            XtX_inv = np.linalg.inv(XtX)
+            # Solve for beta0 without explicit inversion.
+            beta0 = np.linalg.solve(XtX, np.dot(XTVinv, Z))
         except np.linalg.LinAlgError:
-            result = OptimizeResult()
-            result.x = np.repeat(np.nan,X.shape[1]+1)   # estimated coefficients
-            result.se_beta0 = np.nan
-            result.var_beta0 = np.nan
-            result.success = False
-            result.message = "Unable to compute covariance matrix."
-            return result
-        beta0 = np.dot(XtX_inv, np.dot(XTVinv, Z))
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', RuntimeWarning)
-            se_beta0 = np.sqrt(np.diag(XtX_inv))
+            res = OptimizeResult()
+            res.x = np.repeat(np.nan, X.shape[1] + 1)
+            res.se_beta0 = np.nan
+            res.var_beta0 = np.nan
+            res.success = False
+            res.message = "Unable to solve for beta0 (second round)."
+            return res
+
+        # Compute standard errors without explicit inversion.
+        I = np.eye(XtX.shape[0])
+        XtX_inv = np.linalg.solve(XtX, I)  # This gives the full inverse of XtX.
+        se_beta0 = np.sqrt(np.diag(XtX_inv))
         var_beta0 = XtX_inv.flatten()
 
-        # Create an OptimizeResult-like object.
-        result = OptimizeResult()
-        result.x = np.append(beta0,phiHat)   # estimated coefficients
-        result.se_beta0 = se_beta0
-        result.var_beta0 = var_beta0
-        result.success = True
-        result.message = "gls completed successfully."
-        result.var = var_beta0
-
-        return result
+        res = OptimizeResult()
+        res.x = np.append(beta0, phiHat)  # Coefficients and dispersion in one array.
+        res.se_beta0 = se_beta0
+        res.var_beta0 = var_beta0
+        res.success = True
+        res.message = "gls completed successfully."
+        res.var = var_beta0
+        return res
         
     def fit(self, start_params=[], maxiter=10000, maxfev=5000, minimize_method='Nelder-Mead', **kwds):
-        if len(start_params) == 0:
-            # Reasonable starting values
-            try:
-                warnings.simplefilter('ignore', PerfectSeparationWarning)
-                start_params = self.corncob_init()
-            except:
-                start_params = np.hstack([np.repeat(np.arcsin(self.phi_init),self.n_param_abd), np.repeat(np.arcsin(self.phi_init), self.n_param_disp)])
-        
         # Fit the model using Nelder-Mead method and scipy minimize
         if self.fit_method=="gls":
             minimize_res = self.gls()
         if minimize_res.success == False or self.fit_method=="mle":
-            print("Failed GLS")
+            if self.fit_method=="gls": 
+                print("Failed GLS")
+
+            if len(start_params) == 0:
+                # Reasonable starting values
+                try:
+                    warnings.simplefilter('ignore', PerfectSeparationWarning)
+                    start_params = self.corncob_init()
+                except:
+                    start_params = np.hstack([np.repeat(np.arcsin(self.phi_init),self.n_param_abd), np.repeat(np.arcsin(self.phi_init), self.n_param_disp)])
+
             #Minimize the log-likelihood
             minimize_res = minimize(
                 self.beta_binomial_log_likelihood,

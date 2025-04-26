@@ -521,7 +521,7 @@ class pyMethObj():
         beta = normalized_weights @ beta
         return beta
     
-    def wald_test(self, coef, padjust_method='fdr_bh', n_permute=1, find_dmrs='HMM', prop_sig=0.5, 
+    def wald_test(self, coef, padjust_method='fdr_bh', n_permute=1, find_dmrs='binary_search', prop_sig=0.5, 
                   fdr_thresh=0.05, max_gap=1000, min_cpgs=3, n_states=3, state_labels=None, ncpu=1):
         if isinstance(coef, str):
             try:
@@ -600,111 +600,143 @@ class pyMethObj():
 
         else:
             return res
-    
+
     @staticmethod
-    def find_significant_regions(df, prop_sig=0.5, fdr_thresh=0.05, maxthresh=0.2, max_gap=1000, min_cpgs=3):
+    def find_significant_regions(df, prop_sig=0.5, fdr_thresh=0.05, maxthresh=0.2,
+                                max_gap=1000, min_cpgs=3, max_gap_cpgs=2):
         """
         Find regions of adjacent CpGs where:
-        - The gap between successive CpGs is less than max_gap,
-        - The overall proportion of CpGs with fdr < fdr_thresh is >= prop_sig,
-        - The last CpG in the region is significant (fdr < fdr_thresh),
-        - And the region ends if a CpG has fdr > maxthresh.
-
+        - The gap between successive CpGs is less than max_gap.
+        - The region is extended as far as possible until a gap violation, an FDR above maxthresh, 
+            or more than max_gap_cpgs adjacent non-significant CpGs would be introduced.
+        - The region must end on a significant CpG (FDR <= fdr_thresh).
+        - Among candidate regions starting from a given significant CpG, the candidate with the greatest 
+            number of significant CpGs is chosen; ties are broken by selecting the one with the fewest 
+            non-significant CpGs.
+        - The region must contain at least min_cpgs CpGs.
+        
         Parameters:
             df (pd.DataFrame): DataFrame with columns 'chr', 'pos', and 'fdrs'.
             max_gap (int): Maximum allowed gap between adjacent CpGs.
-            prop_sig (float): Minimum proportion of CpGs in a region that must have fdr < fdr_thresh.
+            prop_sig (float): Minimum overall proportion of CpGs that must be significant (FDR <= fdr_thresh).
             fdr_thresh (float): FDR threshold for significance.
-            maxthresh (float): FDR threshold above which a region will end.
+            maxthresh (float): FDR threshold above which a region immediately ends.
             min_cpgs (int): Minimum number of CpGs required in a region.
-
+            max_gap_cpgs (int): Maximum number of adjacent non-significant CpGs allowed in a region.
+        
         Returns:
             pd.DataFrame: DataFrame with columns 'chr', 'start', 'end', 'num_cpgs',
                         'num_sig_cpgs', and 'prop_sig_cpgs' for each region.
         """
         significant_regions = []
+        
         # Sort the DataFrame by chromosome and position.
         df = df.sort_values(by=['chr', 'pos']).reset_index(drop=True)
         
         # Process each chromosome separately.
         for chr_name, group in df.groupby('chr'):
-            # Reset index within the group for 0-based indexing.
+            # Reset index for 0-based indexing.
             chr_df = group.reset_index(drop=True)
             positions = chr_df['pos'].to_numpy()
-            # Binary significance indicator: 1 if fdr < fdr_thresh, 0 otherwise.
-            sig = (chr_df['fdrs'] <= fdr_thresh).astype(int).to_numpy()
             n = len(chr_df)
-            used_cpgs = set()  # For this chromosome only.
-
+            used_cpgs = set()  # to avoid overlaps
+            
             i = 0
             while i < n:
-                # Skip if not significant or already used.
-                if sig[i] == 0 or i in used_cpgs:
+                # Start only if the current CpG is significant and not already used.
+                if chr_df['fdrs'].iloc[i] > fdr_thresh or i in used_cpgs:
                     i += 1
                     continue
-
-                # Identify contiguous block where gaps are within max_gap.
-                start_idx = i
-                end_idx = i
-                while end_idx + 1 < n and (positions[end_idx + 1] - positions[end_idx] <= max_gap):
-                    # Stop the region if the FDR exceeds maxthresh.
-                    if chr_df['fdrs'].iloc[end_idx + 1] > maxthresh:
-                        break
-                    end_idx += 1
-                    if end_idx in used_cpgs:
-                        break
-
-                # Binary search over [i, end_idx] for the furthest index where
-                # the overall proportion meets prop_sig.
-                lo, hi = i, end_idx
-                valid_idx = i
-                while lo <= hi:
-                    mid = (lo + hi) // 2
-                    num_cpgs = mid - i + 1
-                    num_sig = int(np.sum(sig[i:mid+1]))
-                    if num_sig / num_cpgs >= prop_sig:
-                        valid_idx = mid
-                        lo = mid + 1
-                    else:
-                        hi = mid - 1
                 
-                # Now ensure that the last CpG in the region is itself significant.
-                while valid_idx > i and chr_df['fdrs'].iloc[valid_idx] >= fdr_thresh:
-                    valid_idx -= 1
-
-                # Define the region using the trimmed indices.
-                region = chr_df.iloc[i:valid_idx + 1]
-                num_cpgs = len(region)
-                num_sig = (region['fdrs'] < fdr_thresh).sum()
-                prop = num_sig / num_cpgs if num_cpgs > 0 else 0
+                # Extend the region as far as possible from the starting point i.
+                j_max = i
+                while j_max + 1 < n:
+                    # Check the gap constraint.
+                    if positions[j_max + 1] - positions[j_max] > max_gap:
+                        break
+                    # End if the next CpG's FDR is above maxthresh.
+                    if chr_df['fdrs'].iloc[j_max + 1] > maxthresh:
+                        break
+                    
+                    # Check if including the next CpG would create a block of > max_gap_cpgs adjacent non-sig CpGs.
+                    candidate = chr_df['fdrs'].iloc[i:j_max+2].to_numpy()  # region from i to j_max+1
+                    current_count = 0
+                    max_adj_non_sig = 0
+                    for val in candidate:
+                        if val > fdr_thresh:
+                            current_count += 1
+                            max_adj_non_sig = max(max_adj_non_sig, current_count)
+                        else:
+                            current_count = 0
+                    if max_adj_non_sig > max_gap_cpgs:
+                        break
+                    
+                    j_max += 1
                 
-                # Only record if region still meets criteria.
-                if num_cpgs >= min_cpgs and prop >= prop_sig:
+                # Now, consider all candidate endpoints from minimal region size (i + min_cpgs - 1) to j_max.
+                # For each candidate, the region must end on a significant CpG.
+                candidate_regions = []
+                start_index = i
+                for candidate_end in range(max(start_index + min_cpgs - 1, start_index), j_max + 1):
+                    # Skip if the candidate endpoint is not a significant CpG.
+                    if chr_df['fdrs'].iloc[candidate_end] > fdr_thresh:
+                        continue
+                    
+                    subregion = chr_df.iloc[start_index:candidate_end + 1]
+                    num_cpgs = len(subregion)
+                    num_sig = (subregion['fdrs'] <= fdr_thresh).sum()
+                    prop = num_sig / num_cpgs if num_cpgs > 0 else 0
+                    
+                    # Recompute maximum adjacent non-sig count in the candidate region.
+                    candidate_vals = subregion['fdrs'].to_numpy()
+                    current_count = 0
+                    max_adj_non_sig = 0
+                    for val in candidate_vals:
+                        if val > fdr_thresh:
+                            current_count += 1
+                            max_adj_non_sig = max(max_adj_non_sig, current_count)
+                        else:
+                            current_count = 0
+
+                    # Accept candidate only if it meets the overall proportion and does not violate the adjacent rule.
+                    if prop >= prop_sig and max_adj_non_sig <= max_gap_cpgs:
+                        non_sig_count = num_cpgs - num_sig
+                        # Record candidate as a tuple:
+                        # (endpoint index, number of sig CpGs, number of non-sig CpGs, proportion, candidate region DataFrame)
+                        candidate_regions.append((candidate_end, num_sig, non_sig_count, prop, subregion))
+                
+                # If any candidate region meets the criteria, select the one with the most significant CpGs.
+                # Ties are broken by selecting the candidate with fewer non-significant CpGs;
+                # a further tie-breaker is the candidate_end (lowest index).
+                if candidate_regions:
+                    candidate_regions.sort(key=lambda x: (-x[1], x[2], x[0]))
+                    best_candidate_end, best_num_sig, best_non_sig, best_prop, best_region = candidate_regions[0]
+                    num_cpgs = len(best_region)
+                    final_prop = best_num_sig / num_cpgs if num_cpgs > 0 else 0
                     significant_regions.append({
                         'chr': chr_name,
-                        'start': region['pos'].iloc[0],
-                        'end': region['pos'].iloc[-1],
+                        'start': best_region['pos'].iloc[0],
+                        'end': best_region['pos'].iloc[-1],
                         'num_cpgs': num_cpgs,
-                        'num_sig_cpgs': num_sig,
-                        'prop_sig_cpgs': prop
+                        'num_sig_cpgs': best_num_sig,
+                        'prop_sig_cpgs': final_prop
                     })
-                    used_cpgs.update(region.index)
-                
-                # Move to the next candidate region.
-                i = valid_idx + 1
+                    used_cpgs.update(range(i, best_candidate_end + 1))
+                    i = best_candidate_end + 1
+                else:
+                    # If no candidate region meets the criteria, advance beyond the extended region.
+                    i = j_max + 1
 
         return pd.DataFrame(significant_regions)
+
+
     
     @staticmethod
     def find_significant_regions_HMM(cpg_res, n_states=3, min_cpgs=5, fdr_thresh=0.05, prop_sig_thresh=0.5, 
-                                 state_labels=None, hmm_plots=False, hmm_internals=False):
+                                max_gap=5000, state_labels=None, hmm_plots=False, hmm_internals=False, ncpu=4):
         """
         Identify candidate DMR regions using an HMM with multiple states and multivariate features.
-        
-        The function uses two observed features per CpG site: for instance, 
-        'score1' (e.g., –log10(p-value)) and 'score2' (e.g., a test statistic). 
-        An HMM is applied per chromosome to decode the state at each CpG; contiguous CpGs 
-        in a non-background state (e.g., hyper- or hypomethylated) are merged into candidate regions.
+        Utilizes Ray for parallel processing of chromosomes only, not segments.
         
         Parameters
         ----------
@@ -716,72 +748,81 @@ class pyMethObj():
             - 'fdrs': CpG fdrs
             - 'stat': CpG Test Statistic
         n_states : int, default 3
-            Number of HMM states. Here we assume:
-            0: Background,
-            1: Hypermethylated DMR,
-            2: Hypomethylated DMR.
-        min_cpgs : int, default 3
-            Minimum number of consecutive CpGs to report a region.
+            Number of HMM states (0: Background, 1: Hypermethylated, 2: Hypomethylated)
+        min_cpgs : int, default 5
+            Minimum number of consecutive CpGs to report a region
+        fdr_thresh : float, default 0.05
+            FDR threshold for significance
+        prop_sig_thresh : float, default 0.5
+            Minimum proportion of significant CpGs required
+        max_gap : int, default 5000
+            Maximum allowed gap between adjacent CpGs in a region
         state_labels : dict or None
-            Optional mapping from state index to state name. If None, defaults are:
-            {0: 'Background', 1: 'Hypermethylated', 2: 'Hypomethylated'}.
+            Optional mapping from state index to state name
         hmm_plots : bool, default False
-            Whether to generate plots for HMM state decoding.
+            Whether to generate plots for HMM state decoding
         hmm_internals : bool, default False
-            Whether to print internal HMM parameters (e.g., means, transition probabilities).
-        
+            Whether to print internal HMM parameters
+        ncpu : int, default 4
+            Number of CPU cores to use for parallel processing
+            
         Returns
         -------
         regions_df : pd.DataFrame
-            Candidate regions with columns:
-            - 'chr': Chromosome
-            - 'start': Starting position of the region (first CpG)
-            - 'end': Ending position of the region (last CpG)
-            - 'num_cpgs': Number of CpGs in the region
-            - 'state': The region state ('Hypermethylated' or 'Hypomethylated')
+            Candidate regions with chromosome, position, and statistical information
         """
         if state_labels is None:
             state_labels = {0: 'Background', 1: 'Hypermethylated', 2: 'Hypomethylated'}
         
         candidate_regions = []
-
         cpg_res['-log10pval'] = -np.log10(cpg_res['pvals'])
         
-        # Process each chromosome separately.
-        for chrom, group in cpg_res.groupby('chr'):
-            group = group.sort_values('pos').reset_index(drop=True)
-            # Create observations array with both score1 and score2.
+        # Initialize Ray for parallel processing if not already initialized
+        ray_initialized = ray.is_initialized()
+        if not ray_initialized:
+            ray.init(num_cpus=ncpu)
+        
+        @ray.remote
+        def process_chromosome(chrom_group, cpg_res_full):
+            """Process a single chromosome's CpGs to identify DMR regions"""
+            group = chrom_group.sort_values('pos').reset_index(drop=True)
+            chrom = group['chr'].iloc[0]
+            
+            # Create observations array with both score1 and score2
             obs = group[['-log10pval', 'stat']].values  # shape: (n_samples, 2)
             
-            # Initialize a Gaussian HMM with three states and diagonal covariance.
-            model = hmm.GaussianHMM(n_components=n_states, covariance_type="diag", n_iter=100, random_state=42, init_params="c")
-
+            # Initialize a Gaussian HMM with three states and diagonal covariance
+            model = hmm.GaussianHMM(n_components=n_states, covariance_type="diag", 
+                                n_iter=100, random_state=42, init_params="c")
+            
             model.transmat_ = np.array([
                 [0.9999, 0.00005, 0.00005],  # From background
-                [0.005, 0.99, 0.005],          # From hyper
-                [0.005, 0.005, 0.99]           # From hypo
+                [0.005, 0.99, 0.005],        # From hyper
+                [0.005, 0.005, 0.99]         # From hypo
             ])
             
-            # Initialize means. Adjust these based on your data.
-            # Background state: score1 ~ 0.5 (low significance), score2 near 0.
-            # Hypermethylated: high score1 and positive test statistic.
-            # Hypomethylated: high score1 and negative test statistic.
+            # Initialize means
             model.means_ = np.array([
-                [0, 0.0],    # State 0: Background 
+                [0, 0.0],     # State 0: Background 
                 [3.0, 3.0],   # State 1: Hypermethylated 
                 [3.0, -3.0]   # State 2: Hypomethylated
             ])
-            # Initialize diagonal covariances; these can be tuned:
+            
+            # Initialize diagonal covariances
             model.covars_ = np.tile(np.array([1.0, 1.0]), (n_states, 1))
             
-            # Fit the HMM to the observations using Baum-Welch:
+            # Fit the HMM to the observations
             model.fit(obs)
             
-            # Decode the most likely state sequence:
+            if hmm_internals:
+                print("hmm state means:\n", model.means_)
+                print("hmm state transition probabilities:\n", model.transmat_)
+            
+            # Decode the most likely state sequence
             state_seq = model.predict(obs)
             group['state'] = state_seq
             
-            # (Optional) Plot for inspection:
+            # Optional plot for inspection
             if hmm_plots:
                 plt.figure(figsize=(10, 4))
                 plt.plot(group['pos'], group['-log10pval'], 'o-', label='score1 (-log10 pvalue)')
@@ -792,39 +833,69 @@ class pyMethObj():
                 plt.legend()
                 plt.title(f"Chromosome {chrom} Observations and Decoded State")
                 plt.show()
-
-            if hmm_internals:
-                print("hmm state means:\n", model.means_)
-                print("hmm state transition probabilities:\n", model.transmat_)
-
-            # Extract contiguous segments that are in a DMR state (states 1 and 2).
+            
+            # Process segments sequentially (no parallel processing within chromosome)
+            local_regions = []
             current_region = None
+            
             for i, row in group.iterrows():
                 st = row['state']
+                
                 if st != 0:  # non-background state
                     if current_region is None:
                         current_region = {
                             'chr': chrom,
                             'start_idx': i,
                             'end_idx': i,
-                            'state': st  # record the state for current contiguous block
+                            'state': st
                         }
                     else:
-                        if st == current_region['state']:
-                            current_region['end_idx'] = i
-                        else:
-                            # End the current region and start a new one if it's long enough.
+                        # Check if gap exceeds max_gap
+                        if i > 0 and (row['pos'] - group.loc[i-1, 'pos'] > max_gap):
+                            # End current region if long enough
                             if (current_region['end_idx'] - current_region['start_idx'] + 1) >= min_cpgs:
                                 start_pos = group.loc[current_region['start_idx'], 'pos']
                                 end_pos = group.loc[current_region['end_idx'], 'pos']
-                                candidate_regions.append({
+                                
+                                # Count significant CpGs in this region
+                                num_sig = (cpg_res_full.loc[(cpg_res_full.chr == chrom) &
+                                                        (cpg_res_full.pos >= start_pos) &
+                                                        (cpg_res_full.pos <= end_pos), 'fdrs'] <= fdr_thresh).sum()
+                                
+                                local_regions.append({
                                     'chr': chrom,
                                     'start': start_pos,
                                     'end': end_pos,
                                     'num_cpgs': current_region['end_idx'] - current_region['start_idx'] + 1,
-                                    'num_sig': (cpg_res.loc[(cpg_res.chr == chrom) &
-                                                            (cpg_res.pos >= start_pos) &
-                                                            (cpg_res.pos <= end_pos), 'fdrs'] <= fdr_thresh).sum(),
+                                    'num_sig': num_sig,
+                                    'state': state_labels[current_region['state']]
+                                })
+                            # Start a new region
+                            current_region = {
+                                'chr': chrom,
+                                'start_idx': i,
+                                'end_idx': i,
+                                'state': st
+                            }
+                        elif st == current_region['state']:
+                            current_region['end_idx'] = i
+                        else:
+                            # End current region if long enough and start a new one
+                            if (current_region['end_idx'] - current_region['start_idx'] + 1) >= min_cpgs:
+                                start_pos = group.loc[current_region['start_idx'], 'pos']
+                                end_pos = group.loc[current_region['end_idx'], 'pos']
+                                
+                                # Count significant CpGs in this region
+                                num_sig = (cpg_res_full.loc[(cpg_res_full.chr == chrom) &
+                                                        (cpg_res_full.pos >= start_pos) &
+                                                        (cpg_res_full.pos <= end_pos), 'fdrs'] <= fdr_thresh).sum()
+                                
+                                local_regions.append({
+                                    'chr': chrom,
+                                    'start': start_pos,
+                                    'end': end_pos,
+                                    'num_cpgs': current_region['end_idx'] - current_region['start_idx'] + 1,
+                                    'num_sig': num_sig,
                                     'state': state_labels[current_region['state']]
                                 })
                             current_region = {
@@ -833,41 +904,70 @@ class pyMethObj():
                                 'end_idx': i,
                                 'state': st
                             }
-                else:
+                else:  # Background state
                     if current_region is not None:
                         if (current_region['end_idx'] - current_region['start_idx'] + 1) >= min_cpgs:
                             start_pos = group.loc[current_region['start_idx'], 'pos']
                             end_pos = group.loc[current_region['end_idx'], 'pos']
-                            candidate_regions.append({
+                            
+                            # Count significant CpGs in this region
+                            num_sig = (cpg_res_full.loc[(cpg_res_full.chr == chrom) &
+                                                    (cpg_res_full.pos >= start_pos) &
+                                                    (cpg_res_full.pos <= end_pos), 'fdrs'] <= fdr_thresh).sum()
+                            
+                            local_regions.append({
                                 'chr': chrom,
                                 'start': start_pos,
                                 'end': end_pos,
                                 'num_cpgs': current_region['end_idx'] - current_region['start_idx'] + 1,
-                                'num_sig': (cpg_res.loc[(cpg_res.chr == chrom) &
-                                                        (cpg_res.pos >= start_pos) &
-                                                        (cpg_res.pos <= end_pos), 'fdrs'] <= fdr_thresh).sum(),
+                                'num_sig': num_sig,
                                 'state': state_labels[current_region['state']]
                             })
                         current_region = None
-
-            # Check if a region remains at the end:
+            
+            # Check if a region remains at the end
             if current_region is not None and (current_region['end_idx'] - current_region['start_idx'] + 1) >= min_cpgs:
                 start_pos = group.loc[current_region['start_idx'], 'pos']
                 end_pos = group.loc[current_region['end_idx'], 'pos']
-                candidate_regions.append({
+                
+                # Count significant CpGs in this region
+                num_sig = (cpg_res_full.loc[(cpg_res_full.chr == chrom) &
+                                        (cpg_res_full.pos >= start_pos) &
+                                        (cpg_res_full.pos <= end_pos), 'fdrs'] <= fdr_thresh).sum()
+                
+                local_regions.append({
                     'chr': chrom,
                     'start': start_pos,
                     'end': end_pos,
                     'num_cpgs': current_region['end_idx'] - current_region['start_idx'] + 1,
-                    'num_sig': (cpg_res.loc[(cpg_res.chr == chrom) &
-                                            (cpg_res.pos >= start_pos) &
-                                            (cpg_res.pos <= end_pos), 'fdrs'] <= fdr_thresh).sum(),
+                    'num_sig': num_sig,
                     'state': state_labels[current_region['state']]
                 })
+            
+            return local_regions
         
+        # Process each chromosome in parallel
+        chrom_tasks = []
+        for chrom, group in cpg_res.groupby('chr'):
+            chrom_tasks.append(process_chromosome.remote(group, cpg_res))
+        
+        # Collect results
+        chrom_results = ray.get(chrom_tasks)
+        
+        # Combine all regions
+        for chrom_regions in chrom_results:
+            candidate_regions.extend(chrom_regions)
+        
+        # Clean up Ray if we initialized it
+        if not ray_initialized:
+            ray.shutdown()
+        
+        # Create DataFrame from candidate regions and filter by significance threshold
         region_res = pd.DataFrame(candidate_regions)
-        region_res['prop_sig'] = region_res['num_sig'] / region_res['num_cpgs']
-        region_res = region_res[region_res['prop_sig'] >= prop_sig_thresh]
+        if not region_res.empty:
+            region_res['prop_sig'] = region_res['num_sig'] / region_res['num_cpgs']
+            region_res = region_res[region_res['prop_sig'] >= prop_sig_thresh]
+        
         return region_res
 
     def permute_and_refit(self, coef, N=100, padjust_method='fdr_bh', ncpu=1):
