@@ -3,3 +3,4 @@ pyMethTools_venv/
 **.ipynb_checkpoints/**
 **.vscode/**
 **.pytest_cache/**
+**venv/**

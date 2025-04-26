@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 import statsmodels.api as sm
 from scipy import stats
+from scipy.stats import betabinom
 from scipy.optimize import minimize,OptimizeResult
 from scipy import linalg
 from scipy.stats import t,rankdata,norm
@@ -14,7 +15,7 @@ from numpy.linalg import svd, inv, LinAlgError
 import ray
 import warnings
 
-class Corncob_2():
+class FitCpG():
     """
         A python class to perform beta binomical regression on a single cpg.
         Based on pycorncob (https://github.com/jgolob/pycorncob/tree/main), with adjustments for DNA methylation data.
@@ -23,19 +24,17 @@ class Corncob_2():
         These must be in the same length and orientation as covariates
         
     """
-    def __init__(self, total, count, X=None, X_star=None, phi_init=0.5,param_names_abd=["intercept"],param_names_disp=["intercept"],link="arcsin",
-                 fit_method="gls",sample_weights=None,theta=None):
+    def __init__(self, total, count, X=None, X_star=None, phi_init=0.5,link="arcsin",
+                 fit_method="gls",sample_weights=None,theta=None,c0=0.1):
         # Assertions here TODO
-
-        self.meth = total
-        self.coverage = count
+        
         if sample_weights is not None:
             self.sample_weights = sample_weights[~np.isnan(total)]
         else:
             self.sample_weights = np.ones(sum(~np.isnan(total)))
         self.total = total[~np.isnan(total)]
         self.count = count[~np.isnan(total)]
-        self.Z = np.arcsin(np.sqrt((self.count / self.total))) # Transformed methylation proportions
+        self.Z = np.arcsin(2*((self.count + c0)/(self.total+2*c0))-1) # Transformed methylation proportions
         self.n_samples = self.total.shape[0]
         self.X = X[~np.isnan(total)]
         self.X_star = X_star[~np.isnan(total)]
@@ -50,9 +49,6 @@ class Corncob_2():
         if (self.df_residual) < 0:
             raise ValueError("Model overspecified. Trying to fit more parameters than sample size.")
         
-        self.param_names_abd = param_names_abd
-        self.param_names_disp = param_names_disp
-        self.param_names = np.hstack([param_names_abd,param_names_disp])
         self.phi_init = phi_init
         
         # Inits
@@ -168,21 +164,19 @@ class Corncob_2():
         Compute the Hessian matrix numerically using finite differences.
         Adjusted for arcsin link function.
         """
-        W = self.count
-        M = self.total        
+        W = self.total
+        M = self.count        
         
         mu_wlink = np.matmul(self.X, self.theta[:self.n_param_abd])
-        phi_wlink = np.matmul(self.X_star, self.theta[-self.n_param_disp:])
+        phi = np.matmul(self.X_star, self.theta[-self.n_param_disp:])
         
         # Transform to (0,1) scale using arcsin link
         if self.link == "arcsin":
-            mu = np.sin(mu_wlink) ** 2
-            phi = np.sin(phi_wlink) ** 2
+            mu = ((np.sin(mu_wlink) + 1) / 2) 
             dmu_deta = np.sin(2 * mu_wlink)  # First derivative of arcsin link
             d2mu_deta2 = 2 * np.cos(2 * mu_wlink)  # Second derivative of arcsin link
         elif self.link == "logit":
             mu = expit(mu_wlink)
-            phi = expit(phi_wlink)
             dmu_deta = mu * (1 - mu)  # Standard logit derivative
             d2mu_deta2 = dmu_deta * (1 - 2 * mu)
     

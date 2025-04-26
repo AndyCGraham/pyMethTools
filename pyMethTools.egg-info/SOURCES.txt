@@ -1,7 +1,9 @@
+LICENSE.txt
 README.md
 pyproject.toml
+requirements.txt
+pyMethTools/FitCpG.py
 pyMethTools/__init__.py
-pyMethTools/fit_cpg.py
 pyMethTools/pyMethObj.py
 pyMethTools.egg-info/PKG-INFO
 pyMethTools.egg-info/SOURCES.txt
