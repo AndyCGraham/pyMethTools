@@ -524,16 +524,37 @@ class pyMethObj():
 
         Parameters
         ----------
-        params_full : array-like, shape (m, p_full)
-            Arcsin-transformed coefficients for the full model (per CpG: features in columns).
-        params_reduced : array-like, shape (m, p_red)
-            Arcsin-transformed coefficients for the reduced model, nested in full.
-        y : array-like, shape (m,)
-            Observed successes per sample.
-        n : array-like, shape (m,)
-            Trials per sample.
-        phi : float
-            Overdispersion parameter for beta-binomial.
+        coef : str or list of str, optional
+            Name or list of names of parameters to test. Mutually exclusive with `contrast`.
+        contrast : array-like or dict, optional
+            Contrast specification. Can be:
+            - 1D array-like of length p (one contrast)
+            - 2D array-like of shape (k, p) (k contrasts)
+            - dict mapping param names to weights for a single contrast
+            Mutually exclusive with `coef`.
+        padjust_method : str
+            p-value adjustment method (passed to statsmodels.stats.multitest.multipletests).
+        find_dmrs : {'binary_search', 'HMM', None}, default 'binary_search'
+            Method to identify differentially methylated regions (DMRs). Options are:
+            - 'binary_search': Use binary search to find significant regions.
+            - 'HMM': Use a Hidden Markov Model to identify regions.
+            - None: Do not identify DMRs.
+        prop_sig : float, default 0.5
+            Proportion of significant CpGs required to define a DMR.
+        fdr_thresh : float, default 0.1
+            FDR threshold for identifying significant regions.
+        max_gap : int, default 10000
+            Maximum genomic distance (in base pairs) between CpGs to consider them part of the same region.
+        max_gap_cpgs : int, default 3
+            Maximum number of non-significant CpGs allowed between significant CpGs in a region.
+        min_cpgs : int, default 3
+            Minimum number of CpGs required to define a DMR.
+        n_states : int, default 3
+            Number of states for the Hidden Markov Model (if `find_dmrs='HMM'`).
+        state_labels : list of str, optional
+            Labels for the states in the Hidden Markov Model.
+        ncpu : int, default 1
+            Number of CPUs to use for parallel computation.
 
         Returns
         -------
@@ -631,7 +652,29 @@ class pyMethObj():
             Mutually exclusive with `coef`.
         padjust_method : str
             p-value adjustment method (passed to statsmodels.stats.multitest.multipletests).
-        ...  # other existing params unchanged
+        n_permute : int, default 0
+            Number of permutations for empirical p-value calculation. If 0, no permutation testing is performed.
+        find_dmrs : {'binary_search', 'HMM', None}, default 'binary_search'
+            Method to identify differentially methylated regions (DMRs). Options are:
+            - 'binary_search': Use binary search to find significant regions.
+            - 'HMM': Use a Hidden Markov Model to identify regions.
+            - None: Do not identify DMRs.
+        prop_sig : float, default 0.5
+            Proportion of significant CpGs required to define a DMR.
+        fdr_thresh : float, default 0.1
+            FDR threshold for identifying significant regions.
+        max_gap : int, default 10000
+            Maximum genomic distance (in base pairs) between CpGs to consider them part of the same region.
+        max_gap_cpgs : int, default 3
+            Maximum number of non-significant CpGs allowed between significant CpGs in a region.
+        min_cpgs : int, default 3
+            Minimum number of CpGs required to define a DMR.
+        n_states : int, default 3
+            Number of states for the Hidden Markov Model (if `find_dmrs='HMM'`).
+        state_labels : list of str, optional
+            Labels for the states in the Hidden Markov Model.
+        ncpu : int, default 1
+            Number of CPUs to use for parallel computation.
 
         Returns
         -------
