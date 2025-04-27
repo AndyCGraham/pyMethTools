@@ -16,6 +16,11 @@ import random
 import copy
 from hmmlearn import hmm
 from pyMethTools.FitCpG import FitCpG
+from typing import List, Dict, Tuple, Union, Optional, Callable, Any, TypeVar, Sequence, cast
+from typing import Set, Iterator, Generator, Type, Generic, Protocol, overload
+
+T = TypeVar('T')
+U = TypeVar('U')
 
 class pyMethObj():
     """
@@ -31,26 +36,59 @@ class pyMethObj():
     All methods allow parallel processing to speed up computation (set ncpu parameter > 1).
     """
     
-    def __init__(self,meth: np.ndarray,coverage: np.ndarray,target_regions: np.ndarray,
-                 genomic_positions=None,chr=None,covs=None,covs_disp=None,
-                 phi_init: float=0.5,maxiter: int=500,maxfev: int=500,sample_weights=None):
+    def __init__(self,
+                meth: np.ndarray,
+                coverage: np.ndarray,
+                target_regions: np.ndarray,
+                genomic_positions: Optional[np.ndarray] = None,
+                chr: Optional[np.ndarray] = None,
+                covs: Optional[Union[pd.DataFrame, np.ndarray]] = None,
+                covs_disp: Optional[Union[pd.DataFrame, np.ndarray]] = None,
+                phi_init: float = 0.5,
+                maxiter: int = 500,
+                maxfev: int = 500,
+                sample_weights: Optional[np.ndarray] = None) -> None:
         """
-        Intitiate pyMethObj Class
+        Initialize pyMethObj Class with methylation data and configuration parameters.
 
         Parameters:
-            meth (2D numpy array): Count table of methylated reads at each cpg (rows) for each sample (columns).
-            coverage (2D numpy array): Count table of total reads at each cpg (rows) for each sample (columns).
-            target_regions (optional: 1D numpy array): Array of same length as number of cpgs in meth/coverage, specifying which target region each cpg belongs to.
-            genomic_positions (1D Numpy array or None, default: None): Array of same length as number of cpgs in meth/coverage, specifying the genomic position of each cpg on the chromosome.
-            covs (optional: pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the mean parameter, 
-            with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            If not supplied will form only an intercept column.
-            covs_disp (optional: pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion parameter, 
-            with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            If not supplied will form only an intercept column
-            phi_init (float, default: 0.5): Initial value of the dispersion parameter of the beta binomial model fit to each cpg.
-            maxiter (integer, default: 250): Maxinum number of iterations when fitting beta binomial model to a cpg (see numpy minimize).
-            maxfev (integer, default: 250): Maxinum number of evaluations when fitting beta binomial model to a cpg (see numpy minimize).
+            meth (2D numpy array): Count table of methylated reads at each CpG (rows) for each sample (columns).
+            coverage (2D numpy array): Count table of total reads at each CpG (rows) for each sample (columns).
+            target_regions (1D numpy array): Array specifying which target region each CpG belongs to.
+                Must have same length as number of rows in meth/coverage.
+            genomic_positions (1D numpy array or None, default: None): Genomic position of each CpG.
+                Must have same length as number of rows in meth/coverage if provided.
+            chr (1D numpy array or None, default: None): Chromosome identifiers for each CpG.
+                If None, all positions are assigned to "chr".
+            covs (pandas DataFrame or numpy array, optional): Design matrix for the mean parameter.
+                Shape (number samples, number covariates) with one column per covariate, 
+                including an intercept column (usually 1's named 'intercept').
+                If not supplied, only an intercept column will be created.
+            covs_disp (pandas DataFrame or numpy array, optional): Design matrix for the dispersion parameter.
+                Shape (number samples, number covariates) with one column per covariate,
+                including an intercept column (usually 1's named 'intercept').
+                If not supplied, only an intercept column will be created.
+            phi_init (float, default: 0.5): Initial value for the dispersion parameter.
+            maxiter (int, default: 500): Maximum number of iterations for model fitting.
+            maxfev (int, default: 500): Maximum number of function evaluations for model fitting.
+            sample_weights (array-like or None, default: None): Optional weights for samples in the likelihood calculations.
+
+        Raises:
+            ValueError: If the model is overspecified (more parameters than samples).
+            AssertionError: If input validation fails.
+
+        Notes:
+            Categorical covariates should be one-hot encoded before being passed to this function.
+            The best way to provide covariates is to use Patsy dmatrix:
+            # For an object fitted with design matrix for two treatments (control, treated) and two timepoints (T1, T2):
+            #   covs columns will be: Intercept, treatment[T.treated], timepoint[T.T2],
+            #   treatment[T.treated]:timepoint[T.T2]
+            from patsy import dmatrix
+            covs = dmatrix(
+                "treatment + timepoint + treatment:timepoint",
+                data=sample_traits, # Dataframe with sample traits (including treatment + timepoint columns)
+                return_type='dataframe'
+            )
         """
 
         assert meth.shape == coverage.shape, "'meth' and 'coverage' must have the same shape"
@@ -125,17 +163,50 @@ class pyMethObj():
         self.region_cov_sd = []
         self.disp_intercept = []
 
-    def fit_betabinom(self,ncpu: int=1,start_params=[],maxiter=None,maxfev=None,link="arcsin",fit_method="gls",chunksize=1,X=None,
-                      return_params=False):
+    def fit_betabinom(self,
+                     ncpu: int=1,
+                     start_params: List[float]=[],
+                     maxiter: Optional[int]=None,
+                     maxfev: Optional[int]=None,
+                     link: str="arcsin",
+                     fit_method: str="gls",
+                     chunksize: int=1,
+                     X: Optional[np.ndarray]=None,
+                     return_params: bool=False) -> Optional[List[np.ndarray]]:
         """
-        Fit beta binomial model to DNA methylation data.
+        Fit beta binomial model to DNA methylation data, with optional parallel processing.
     
         Parameters:
-            chunksize (integer, default: 1): Number of regions to process at once if using parallel processing.
-            ncpu (integer, default: 1): Number of cpus to use. If > 1 will use a parallel backend with Ray.
+            ncpu (int, default: 1): Number of CPU cores to use for parallel processing. 
+                Values > 1 will use Ray for parallelization.
+            start_params (list, default: []): Initial parameter values for optimization. 
+                If empty, default initialization is used.
+            maxiter (int, default: None): Maximum number of iterations for optimization.
+                If None, uses the value specified during object initialization.
+            maxfev (int, default: None): Maximum number of function evaluations for optimization.
+                If None, uses the value specified during object initialization.
+            link (str, default: "arcsin"): Link function for the mean parameter.
+                Options: "arcsin" or "logit".
+            fit_method (str, default: "gls"): Method used for fitting the model.
+                Options include "gls" (generalized least squares) or "mle" (mmaximum likelihood estimation).
+            chunksize (int, default: 1): Number of regions to process in each parallel task.
+                Larger values may improve performance with many small regions.
+            X (array-like, default: None): Alternative design matrix for the mean parameter.
+                If None, uses the design matrix specified during object initialization.
+            return_params (bool, default: False): If True, returns the fitted parameters 
+                instead of storing them in the object.
             
         Returns:
-            numpy array: Array of optimisation results of length equal to the number of cpgs. 
+            If return_params is True, returns a list of fitted parameter arrays.
+            Otherwise, stores results in self.fits and self.se.
+            
+        Notes:
+            - This method fits a beta-binomial model to each CpG, estimating parameters 
+              that describe methylation probability and dispersion.
+            - When using parallel processing (ncpu > 1), the Ray framework distributes 
+              computation across available cores.
+            - Larger chunksize values can improve performance by reducing communication 
+              overhead, especially when processing many small regions.
         """
 
         assert isinstance(ncpu,int), "ncpu must be positive integer"
@@ -198,22 +269,53 @@ class pyMethObj():
 
     @staticmethod
     @ray.remote
-    def fit_betabinom_chunk(region_id,meth_id,coverage_id,X_id,X_star_id,fit_region,fit_cpg,unique,maxiter=150,maxfev=150,start_params=[],
-                            param_names_abd=["intercept"],param_names_disp=["intercept"],link="arcsin",fit_method="gls",
-                            sample_weights=None):
+    def fit_betabinom_chunk(region_id: np.ndarray,
+                           meth_id: np.ndarray,
+                           coverage_id: np.ndarray,
+                           X_id: np.ndarray,
+                           X_star_id: np.ndarray,
+                           fit_region: Callable,
+                           fit_cpg: Callable,
+                           unique: Callable,
+                           maxiter: int=150,
+                           maxfev: int=150,
+                           start_params: List[float]=[],
+                           param_names_abd: List[str]=["intercept"],
+                           param_names_disp: List[str]=["intercept"],
+                           link: str="arcsin",
+                           fit_method: str="gls",
+                           sample_weights: Optional[np.ndarray]=None) -> Tuple[List[np.ndarray], List[np.ndarray]]:
         """
-        Fit beta binomial model to a chunk of target regions from DNA methylation data.
-    
+        Process a chunk of target regions in parallel for beta-binomial model fitting.
+        
+        This remote function is designed to be executed via Ray for parallel processing. It takes
+        a subset of regions and performs model fitting for all CpGs in those regions.
+        
         Parameters:
-            chunk_regions (numpy array): Array of region assignments for this chunk.
-            meth_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of methylated reads at each cpg (rows) for each sample (columns).
-            coverage_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of total reads at each cpg (rows) for each sample (columns).
-            region_id (ray ID): ID of global value produced by ray.put(), pointing to a global array of cpg region assignments.
-            maxiter (integer, default: 250): Maxinum number of iterations when fitting beta binomial model to a cpg (see numpy minimize).
-            maxfev (integer, default: 250): Maxinum number of evaluations when fitting beta binomial model to a cpg (see numpy minimize).
+            region_id (numpy array): Array of region assignments for the CpGs in this chunk.
+            meth_id (ray.ObjectRef): Reference to methylation count data (shared via ray.put).
+            coverage_id (ray.ObjectRef): Reference to coverage count data (shared via ray.put).
+            X_id (ray.ObjectRef): Reference to design matrix for mean parameters (shared via ray.put).
+            X_star_id (ray.ObjectRef): Reference to design matrix for dispersion parameters (shared via ray.put).
+            fit_region (function): Function to fit the model to a region.
+            fit_cpg (function): Function to fit the model to a single CpG.
+            unique (function): Helper function to get unique elements while preserving order.
+            maxiter (int, default: 150): Maximum number of iterations for optimization.
+            maxfev (int, default: 150): Maximum number of function evaluations.
+            start_params (list, default: []): Initial parameter values for optimization.
+            param_names_abd (list, default: ["intercept"]): Names of mean parameters.
+            param_names_disp (list, default: ["intercept"]): Names of dispersion parameters.
+            link (str, default: "arcsin"): Link function for the mean parameter.
+            fit_method (str, default: "gls"): Method for fitting the model.
+            sample_weights (array-like or None, default: None): Optional weights for samples.
             
         Returns:
-            numpy array: Array of optimisation results of length equal to the number of cpgs in this chunk. 
+            tuple: Contains two lists - the fitted parameters and standard errors for all CpGs
+                  in the processed regions.
+                  
+        Notes:
+            This function is designed to be called via ray.remote to enable parallel processing
+            across multiple cores. The region_id array determines which CpGs are processed together.
         """
         fits,se = zip(*[fit_region(meth_id[region_id==region],coverage_id[region_id==region],
                            X_id,X_star_id,fit_cpg,maxiter,maxfev,start_params,param_names_abd,param_names_disp,link,fit_method,
@@ -222,24 +324,49 @@ class pyMethObj():
         return fits,se
 
     @staticmethod
-    def fit_region_internal(meth_id,coverage_id,X_id,X_star_id,fit_cpg,maxiter=150,maxfev=150,start_params=[],param_names_abd=["intercept"],
-                            param_names_disp=["intercept"],link="arcsin",fit_method="gls",sample_weights=None):
+    def fit_region_internal(meth_id: np.ndarray,
+                           coverage_id: np.ndarray,
+                           X_id: np.ndarray,
+                           X_star_id: np.ndarray,
+                           fit_cpg: Callable,
+                           maxiter: int=150,
+                           maxfev: int=150,
+                           start_params: List[float]=[],
+                           param_names_abd: List[str]=["intercept"],
+                           param_names_disp: List[str]=["intercept"],
+                           link: str="arcsin",
+                           fit_method: str="gls",
+                           sample_weights: Optional[np.ndarray]=None) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Perform differential methylation analysis on a single cpg using beta binomial regression.
-    
+        Fit beta-binomial models to all CpGs within a region.
+        
+        This function iterates through each CpG in the region and applies the fit_cpg function
+        to estimate parameters for the beta-binomial model. It then combines the results into
+        matrices of parameter estimates and standard errors.
+        
         Parameters:
-            cpg (integer, float, or string): Cpg row number in meth_id/coverage_id.
-            meth_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of methylated reads at each cpg (rows) for each sample (columns).
-            coverage_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of total reads at each cpg (rows) for each sample (columns).
-            X_id (ray ID): ID of global value produced by ray.put(), pointing to a global dataframe shape (number samples, number covariates) specifying the covariate design 
-            matrix for the mean parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            If not supplied will form only an intercept column.
-            X_star_id (ray ID): ID of global value produced by ray.put(), pointing to a global dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion 
-            parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            If not supplied will form only an intercept column.
+            meth_id (numpy array): Count table of methylated reads for each CpG in the region.
+            coverage_id (numpy array): Count table of total reads for each CpG in the region.
+            X_id (numpy array): Design matrix for the mean parameter.
+            X_star_id (numpy array): Design matrix for the dispersion parameter.
+            fit_cpg (function): Function to fit the beta-binomial model to a single CpG.
+            maxiter (int, default: 150): Maximum number of iterations for optimization.
+            maxfev (int, default: 150): Maximum number of function evaluations.
+            start_params (list, default: []): Initial parameter values for optimization.
+            param_names_abd (list, default: ["intercept"]): Names of mean parameters.
+            param_names_disp (list, default: ["intercept"]): Names of dispersion parameters.
+            link (str, default: "arcsin"): Link function for the mean parameter.
+            fit_method (str, default: "gls"): Method for fitting the model.
+            sample_weights (array-like or None, default: None): Optional weights for samples.
             
         Returns:
-            pandas dataframe: Dataframe containing estimates of coeficents for the cpg. 
+            tuple: Contains two numpy arrays - the fitted parameters and standard errors for all CpGs
+                  in the region. Each array has shape (n_cpgs, n_params).
+                  
+        Notes:
+            This function processes all CpGs in a region sequentially. It is typically called
+            by fit_betabinom_chunk during parallel processing or directly by fit_betabinom
+            when processing regions without parallelization.
         """
         fits,se = zip(*[fit_cpg(meth_id[cpg],coverage_id[cpg],X_id,X_star_id,maxiter,maxfev,start_params,param_names_abd,param_names_disp,
                                        link,fit_method,sample_weights) 
@@ -251,24 +378,50 @@ class pyMethObj():
 
     @staticmethod
     @ray.remote
-    def fit_region(cpgs,meth_id,coverage_id,X_id,X_star_id,fit_cpg,maxiter=150,maxfev=150,start_params=[],param_names_abd=["intercept"],
-                   param_names_disp=["intercept"],link="arcsin",fit_method="gls",sample_weights=None):
+    def fit_region(cpgs: np.ndarray,
+                  meth_id: np.ndarray,
+                  coverage_id: np.ndarray,
+                  X_id: np.ndarray,
+                  X_star_id: np.ndarray,
+                  fit_cpg: Callable,
+                  maxiter: int=150,
+                  maxfev: int=150,
+                  start_params: List[float]=[],
+                  param_names_abd: List[str]=["intercept"],
+                  param_names_disp: List[str]=["intercept"],
+                  link: str="arcsin",
+                  fit_method: str="gls",
+                  sample_weights: Optional[np.ndarray]=None) -> Tuple[List[np.ndarray], List[np.ndarray]]:
         """
-        Perform differential methylation analysis on a single cpg using beta binomial regression.
-    
+        Fit beta-binomial models to a specific region in parallel using Ray.
+        
+        This remote function is parallelized through Ray to enable concurrent 
+        processing of different regions. It iterates through each CpG in the 
+        specified region and applies the fit_cpg function to estimate parameters.
+        
         Parameters:
-            cpg (integer, float, or string): Cpg row number in meth_id/coverage_id.
-            meth_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of methylated reads at each cpg (rows) for each sample (columns).
-            coverage_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of total reads at each cpg (rows) for each sample (columns).
-            X_id (ray ID): ID of global value produced by ray.put(), pointing to a global dataframe shape (number samples, number covariates) specifying the covariate design 
-            matrix for the mean parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            If not supplied will form only an intercept column.
-            X_star_id (ray ID): ID of global value produced by ray.put(), pointing to a global dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion 
-            parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            If not supplied will form only an intercept column.
+            cpgs (array-like): Indices of CpGs belonging to this region.
+            meth_id (ray.ObjectRef): Ray reference to the methylation count data.
+            coverage_id (ray.ObjectRef): Ray reference to the coverage count data.
+            X_id (ray.ObjectRef): Ray reference to the design matrix for mean parameters.
+            X_star_id (ray.ObjectRef): Ray reference to the design matrix for dispersion parameters.
+            fit_cpg (function): Function to fit the model to a single CpG.
+            maxiter (int, default: 150): Maximum number of iterations for optimization.
+            maxfev (int, default: 150): Maximum number of function evaluations.
+            start_params (list, default: []): Initial parameter values for optimization.
+            param_names_abd (list, default: ["intercept"]): Names of mean parameters.
+            param_names_disp (list, default: ["intercept"]): Names of dispersion parameters.
+            link (str, default: "arcsin"): Link function for the mean parameter.
+            fit_method (str, default: "gls"): Method for fitting the model.
+            sample_weights (array-like or None, default: None): Optional weights for samples.
             
         Returns:
-            pandas dataframe: Dataframe containing estimates of coeficents for the cpg. 
+            tuple: Lists of fitted parameters and standard errors for all CpGs in the region.
+            
+        Notes:
+            This function is designed to be called remotely via ray.remote to enable
+            parallel processing. The function processes all CpGs belonging to a specific
+            region (target region) and returns the combined results.
         """
         fits,se = zip(*[fit_cpg(meth_id[cpg],coverage_id[cpg],X_id,X_star_id,maxiter,maxfev,start_params,param_names_abd,param_names_disp,
                                        link,fit_method,sample_weights) 
@@ -277,24 +430,45 @@ class pyMethObj():
         return fits,se
     
     @staticmethod
-    def fit_cpg_internal(meth,coverage,X,X_star,maxiter=150,maxfev=150,start_params=[],param_names_abd=["intercept"],param_names_disp=["intercept"],
-                link="arcsin",fit_method="gls",sample_weights=None):
+    def fit_cpg_internal(meth: np.ndarray,
+                        coverage: np.ndarray,
+                        X: np.ndarray,
+                        X_star: np.ndarray,
+                        maxiter: int=150,
+                        maxfev: int=150,
+                        start_params: List[float]=[],
+                        param_names_abd: List[str]=["intercept"],
+                        param_names_disp: List[str]=["intercept"],
+                        link: str="arcsin",
+                        fit_method: str="gls",
+                        sample_weights: Optional[np.ndarray]=None) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Perform differential methylation analysis on a single cpg using beta binomial regression.
-    
+        Fit a beta-binomial model to a single CpG site.
+        
+        This function handles the core model fitting for a single CpG, creating and
+        optimizing a FitCpG object with the provided data. It's used internally by 
+        both parallel and sequential fitting methods.
+        
         Parameters:
-            cpg (integer, float, or string): Cpg row number in meth_id/coverage_id.
-            meth_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of methylated reads at each cpg (rows) for each sample (columns).
-            coverage_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of total reads at each cpg (rows) for each sample (columns).
-            X_id (ray ID): ID of global value produced by ray.put(), pointing to a global dataframe shape (number samples, number covariates) specifying the covariate design 
-            matrix for the mean parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            If not supplied will form only an intercept column.
-            X_star_id (ray ID): ID of global value produced by ray.put(), pointing to a global dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion 
-            parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            If not supplied will form only an intercept column.
+            meth (array-like): Methylated read counts for one CpG across all samples.
+            coverage (array-like): Total read counts for one CpG across all samples.
+            X (numpy array): Design matrix for the mean parameter.
+            X_star (numpy array): Design matrix for the dispersion parameter.
+            maxiter (int, default: 150): Maximum number of iterations for optimization.
+            maxfev (int, default: 150): Maximum number of function evaluations.
+            start_params (list, default: []): Initial parameter values for optimization.
+            param_names_abd (list, default: ["intercept"]): Names of mean parameters.
+            param_names_disp (list, default: ["intercept"]): Names of dispersion parameters.
+            link (str, default: "arcsin"): Link function for the mean parameter.
+            fit_method (str, default: "gls"): Method for fitting the model.
+            sample_weights (array-like or None, default: None): Optional weights for samples.
             
         Returns:
-            pandas dataframe: Dataframe containing estimates of coeficents for the cpg. 
+            tuple: Contains two arrays - the fitted parameters (x) and their standard errors (se_beta0).
+            
+        Notes:
+            This is a utility function that wraps the FitCpG class to handle the actual model fitting.
+            It's used by both the parallel and sequential implementations of beta-binomial fitting.
         """
         cc = FitCpG(
                     total=coverage,
@@ -309,29 +483,30 @@ class pyMethObj():
         e_m = cc.fit(maxiter=maxiter,maxfev=maxfev,start_params=start_params)
         return e_m.x,e_m.se_beta0
         
-    def fit_cpg_local(self,X,cpg,start_params=[]):
+    def fit_cpg_local(self,
+                     X: np.ndarray,
+                     cpg: int,
+                     start_params: List[float]=[]) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Perform differential methylation analysis on a single cpg using beta binomial regression.
-    
+        Fit a beta-binomial model to a single CpG site using object instance data.
+        
+        This method is a non-parallelized version of the CpG fitting function that 
+        operates directly on the object's data. It handles missing values and uses the 
+        object's configuration for model fitting.
+        
         Parameters:
-            region (integer, float, or string): Name of the region being analysed.
-            site (integer, float, or string): Name of cpg.
-            meth (2D numpy array): Count table of methylated reads at each cpg in the region (rows) for each sample (columns).
-            coverage (2D numpy array): Count table of total reads at each cpg in the region (rows) for each sample (columns).
-            X (pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the mean parameter, 
-            with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            If not supplied will form only an intercept column.
-            X_star (pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion parameter, 
-            with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            If not supplied will form only an intercept column.
-            min_cpgs (integer, default: 3): Minimum length of a dmr.
-            res (boolean, default: True): Whether to return regression results.
-            LL (boolean, default: False): Whether to return model log likelihood.
-            
+            X (numpy array): Design matrix for the mean parameter.
+            cpg (int): Index of the CpG site to fit in the object's data arrays.
+            start_params (list, default: []): Initial parameter values for optimization.
             
         Returns:
-            pandas dataframe (optional, depending in res parameter): Dataframe containing estimates of coeficents for the cpg. 
-            float (optional, depending in LL parameter): Model log likelihood
+            tuple: Contains two arrays - the fitted parameters (x) and their standard errors (se_beta0).
+            
+        Notes:
+            This method filters out missing values (NaN) before fitting the model and
+            uses the object's link function, fitting method, and other parameters stored
+            in the instance attributes. It's primarily used by the non-parallel
+            implementation of the beta-binomial fitting process.
         """
         cc = FitCpG(
                     total=self.coverage[cpg][~np.isnan(self.meth[cpg])],
@@ -345,25 +520,33 @@ class pyMethObj():
         e_m = cc.fit(maxiter=self.maxiter,maxfev=self.maxfev,start_params=start_params)
         return e_m.x,e_m.se_beta0
 
-    def fit_region_local(self,X,cpgs,region,start_params=[]):
+    def fit_region_local(self,
+                        X: np.ndarray,
+                        cpgs: np.ndarray,
+                        region: Union[int, str],
+                        start_params: List[float]=[]) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Perform differential methylation analysis on a single cpg using beta binomial regression.
-    
+        Fit beta-binomial models to all CpGs in a region using non-parallelized processing.
+        
+        This method processes all CpGs belonging to a specific region sequentially,
+        applying the fit_cpg_local method to each one. It's used for fitting models
+        when parallel processing is not enabled (ncpu=1).
+        
         Parameters:
-            cpg (integer, float, or string): Cpg row number in meth_id/coverage_id.
-            meth_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of methylated reads at each cpg (rows) for each sample (columns).
-            coverage_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of total reads at each cpg (rows) for each sample (columns).
-            X_id (ray ID): ID of global value produced by ray.put(), pointing to a global dataframe shape (number samples, number covariates) specifying the covariate design 
-            matrix for the mean parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            If not supplied will form only an intercept column.
-            X_star_id (ray ID): ID of global value produced by ray.put(), pointing to a global dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion 
-            parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            If not supplied will form only an intercept column.
+            X (numpy array): Design matrix for the mean parameter.
+            cpgs (array-like): Indices of all CpGs in the dataset.
+            region (int or str): Identifier for the region to process.
+            start_params (list, default: []): Initial parameter values for optimization.
             
         Returns:
-            pandas dataframe: Dataframe containing estimates of coeficents for the cpg. 
+            tuple: Contains two numpy arrays - the fitted parameters and standard errors
+                  for all CpGs in the region. Each array has shape (n_cpgs, n_params).
+                  
+        Notes:
+            This method filters the CpGs to only include those that belong to the specified
+            region before processing. It's used as an alternative to the ray-based parallel
+            implementation when running on a single CPU.
         """
-
         fits,se = zip(*[self.fit_cpg_local(X,cpg,start_params) for cpg in cpgs[self.target_regions==region]])
         fits = np.vstack(fits)
         se = np.vstack(se)
@@ -372,24 +555,48 @@ class pyMethObj():
 
     @staticmethod
     @ray.remote
-    def fit_cpg(cpg,meth,coverage,X,X_star,maxiter=150,maxfev=150,start_params=[],param_names_abd=["intercept"],param_names_disp=["intercept"],
-                link="arcsin",fit_method="gls",sample_weights=None):
+    def fit_cpg(cpg: int,
+               meth: np.ndarray,
+               coverage: np.ndarray,
+               X: np.ndarray,
+               X_star: np.ndarray,
+               maxiter: int=150,
+               maxfev: int=150,
+               start_params: List[float]=[],
+               param_names_abd: List[str]=["intercept"],
+               param_names_disp: List[str]=["intercept"],
+               link: str="arcsin",
+               fit_method: str="gls",
+               sample_weights: Optional[np.ndarray]=None) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Perform differential methylation analysis on a single cpg using beta binomial regression.
-    
+        Fit a beta-binomial model to a single CpG site using Ray for parallel processing.
+        
+        This remote function handles the model fitting for a single CpG in a parallel 
+        computing environment. It's designed to be executed within Ray's parallel 
+        computing framework.
+        
         Parameters:
-            cpg (integer, float, or string): Cpg row number in meth_id/coverage_id.
-            meth_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of methylated reads at each cpg (rows) for each sample (columns).
-            coverage_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of total reads at each cpg (rows) for each sample (columns).
-            X_id (ray ID): ID of global value produced by ray.put(), pointing to a global dataframe shape (number samples, number covariates) specifying the covariate design 
-            matrix for the mean parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            If not supplied will form only an intercept column.
-            X_star_id (ray ID): ID of global value produced by ray.put(), pointing to a global dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion 
-            parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            If not supplied will form only an intercept column.
+            cpg (int): Index of the CpG site to fit.
+            meth (numpy array): Methylation count data for all CpGs.
+            coverage (numpy array): Coverage count data for all CpGs.
+            X (numpy array): Design matrix for the mean parameter.
+            X_star (numpy array): Design matrix for the dispersion parameter.
+            maxiter (int, default: 150): Maximum number of iterations for optimization.
+            maxfev (int, default: 150): Maximum number of function evaluations.
+            start_params (list, default: []): Initial parameter values for optimization.
+            param_names_abd (list, default: ["intercept"]): Names of mean parameters.
+            param_names_disp (list, default: ["intercept"]): Names of dispersion parameters.
+            link (str, default: "arcsin"): Link function for the mean parameter.
+            fit_method (str, default: "gls"): Method for fitting the model.
+            sample_weights (array-like or None, default: None): Optional weights for samples.
             
         Returns:
-            pandas dataframe: Dataframe containing estimates of coeficents for the cpg. 
+            tuple: Contains two arrays - the fitted parameters (x) and their standard errors (se_beta0).
+            
+        Notes:
+            This function is decorated with @ray.remote to enable distributed processing.
+            It creates a FitCpG object with the specific CpG's data and returns the 
+            optimization results after fitting the beta-binomial model.
         """
         cc = FitCpG(
                     total=coverage[cpg],
@@ -404,8 +611,40 @@ class pyMethObj():
         e_m = cc.fit(maxiter=maxiter,maxfev=maxfev,start_params=start_params)
         return e_m.x,e_m.se_beta0
 
-    def smooth(self,lambda_factor=10,param="intercept",ncpu: int=1,chunksize=1):
-
+    def smooth(self,
+              lambda_factor: float=10,
+              param: str="intercept",
+              ncpu: int=1,
+              chunksize: int=1) -> None:
+        """
+        Smooth the fitted beta-binomial parameters across genomic positions.
+        
+        This method applies a spatial smoothing algorithm to the fitted parameters
+        to reduce noise and improve parameter estimates by borrowing information
+        from nearby CpGs. The smoothing is weighted based on genomic distance
+        and parameter similarity.
+        
+        Parameters:
+            lambda_factor (float, default: 10): Scaling factor that controls the
+                strength of smoothing. Higher values result in more smoothing.
+            param (str, default: "intercept"): Parameter name to use for calculating
+                similarity weights in the smoothing process.
+            ncpu (int, default: 1): Number of CPU cores to use for parallel processing.
+                Values > 1 will use Ray for parallelization.
+            chunksize (int, default: 1): Number of regions to process in each parallel task.
+                Larger values may improve performance with many small regions.
+                
+        Returns:
+            None: The smoothed parameters replace the original parameters in self.fits.
+            
+        Notes:
+            - This method applies a custom kernel smoothing approach that weights observations 
+              by both genomic proximity and parameter similarity.
+            - The smoothing process respects region boundaries (doesn't smooth across regions).
+            - Coverage depth is considered in the weighting to give less influence to
+              low-coverage positions.
+            - When ncpu > 1, processing is parallelized using Ray.
+        """
         if ncpu > 1:
             ray.init(num_cpus=ncpu)  
             if chunksize > 1:
@@ -427,20 +666,40 @@ class pyMethObj():
 
     @staticmethod
     @ray.remote
-    def smooth_chunk(region_id,fits,n_param_abd,genomic_positions,coverage,smooth_region,unique,lambda_factor,link="arcsin"):
+    def smooth_chunk(region_id: np.ndarray,
+                    fits: List[np.ndarray],
+                    n_param_abd: int,
+                    genomic_positions: np.ndarray,
+                    coverage: np.ndarray,
+                    smooth_region: Callable,
+                    unique: Callable,
+                    lambda_factor: float,
+                    link: str="arcsin") -> List[np.ndarray]:
         """
-        Fit beta binomial model to a chunk of target regions from DNA methylation data.
-    
+        Process a chunk of regions for parallel smoothing of fitted parameters.
+        
+        This remote function is designed to be executed via Ray for parallel processing. 
+        It takes a subset of regions and performs parameter smoothing for all CpGs in 
+        those regions.
+        
         Parameters:
-            chunk_regions (numpy array): Array of region assignments for this chunk.
-            meth_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of methylated reads at each cpg (rows) for each sample (columns).
-            coverage_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of total reads at each cpg (rows) for each sample (columns).
-            region_id (ray ID): ID of global value produced by ray.put(), pointing to a global array of cpg region assignments.
-            maxiter (integer, default: 250): Maxinum number of iterations when fitting beta binomial model to a cpg (see numpy minimize).
-            maxfev (integer, default: 250): Maxinum number of evaluations when fitting beta binomial model to a cpg (see numpy minimize).
+            region_id (numpy array): Array of region assignments for the CpGs in this chunk.
+            fits (list): Fitted parameters for CpGs in the target regions.
+            n_param_abd (int): Number of abundance parameters in the model.
+            genomic_positions (numpy array): Genomic positions of CpGs in the target regions.
+            coverage (numpy array): Coverage data for CpGs in the target regions.
+            smooth_region (function): Function to smooth parameters for a single region.
+            unique (function): Helper function to get unique elements while preserving order.
+            lambda_factor (float): Scaling factor controlling smoothing strength.
+            link (str, default: "arcsin"): Link function used in the model.
             
         Returns:
-            numpy array: Array of optimisation results of length equal to the number of cpgs in this chunk. 
+            list: Smoothed parameter fits for all regions in this chunk.
+            
+        Notes:
+            This function is designed to be called via ray.remote to enable parallel
+            processing across multiple cores. It applies smoothing to each region
+            in the chunk independently.
         """
         fits = [smooth_region(fits[reg_num],param,param_names,n_param_abd,genomic_positions[region_id==region],np.nanmean(coverage[region_id==region],axis=1),lambda_factor,link) 
                          for reg_num,region in enumerate(unique(region_id))]
@@ -448,7 +707,43 @@ class pyMethObj():
         return fits
         
     @staticmethod
-    def smooth_region_local(beta,param,param_names,n_par_abd,genomic_positions,cov,lambda_factor=10,link= "arcsin"):
+    def smooth_region_local(beta: np.ndarray,
+                           param: str,
+                           param_names: np.ndarray,
+                           n_par_abd: int,
+                           genomic_positions: np.ndarray,
+                           cov: np.ndarray,
+                           lambda_factor: float=10,
+                           link: str="arcsin") -> np.ndarray:
+        """
+        Smooth fitted parameters for a region using a kernel-based approach.
+        
+        This function applies spatial smoothing to the parameter estimates within a region.
+        Smoothing is weighted by genomic distance, parameter similarity, and coverage depth
+        to improve parameter estimates by borrowing information from nearby CpGs.
+        
+        Parameters:
+            beta (numpy array): Array of fitted parameters for CpGs in the region.
+            param (str): Parameter name to use for calculating similarity weights.
+            param_names (list): Names of all parameters in the model.
+            n_par_abd (int): Number of abundance parameters in the model.
+            genomic_positions (numpy array): Genomic positions of CpGs in the region.
+            cov (numpy array): Mean coverage depth for each CpG in the region.
+            lambda_factor (float, default: 10): Scaling factor controlling smoothing strength.
+            link (str, default: "arcsin"): Link function used in the model.
+            
+        Returns:
+            numpy array: Smoothed parameter estimates for the region.
+            
+        Notes:
+            The smoothing algorithm uses three types of weights:
+            1. Genomic weights: Based on genomic distance between CpGs
+            2. Parameter weights: Based on similarity of the parameter values
+            3. Coverage weights: Giving less influence to low-coverage positions
+            
+            The final weights are a product of these three weight components, and are
+            used to compute a weighted average of the parameters across CpGs.
+        """
         genomic_distances = np.abs(genomic_positions[:, None] - genomic_positions[None, :])
         
         if link == "arcsin":
@@ -478,7 +773,38 @@ class pyMethObj():
 
     @staticmethod
     @ray.remote
-    def smooth_region(beta, n_par_abd, genomic_positions, cov, lambda_factor=10, link= "arcsin"):
+    def smooth_region(beta: np.ndarray,
+                     n_par_abd: int,
+                     genomic_positions: np.ndarray,
+                     cov: np.ndarray,
+                     lambda_factor: float=10,
+                     link: str="arcsin") -> np.ndarray:
+        """
+        Smooth fitted parameters for a region using Ray for parallel processing.
+        
+        This remote function applies spatial smoothing to parameter estimates within
+        a region using a kernel-based approach. It's designed to be executed within
+        Ray's parallel computing framework.
+        
+        Parameters:
+            beta (numpy array): Array of fitted parameters for CpGs in the region.
+            n_par_abd (int): Number of abundance parameters in the model.
+            genomic_positions (numpy array): Genomic positions of CpGs in the region.
+            cov (numpy array): Mean coverage depth for each CpG in the region.
+            lambda_factor (float, default: 10): Scaling factor controlling smoothing strength.
+            link (str, default: "arcsin"): Link function used in the model.
+            
+        Returns:
+            numpy array: Smoothed parameter estimates for the region.
+            
+        Notes:
+            This function is decorated with @ray.remote to enable distributed processing.
+            It uses the same kernel-based smoothing approach as smooth_region_local, but
+            only considers the intercept parameter for similarity weighting (first column
+            of the parameter matrix).
+            
+            The smoothing process is applied twice consecutively to further reduce noise.
+        """
         genomic_distances = np.abs(genomic_positions[:, None] - genomic_positions[None, :])
         
         if link == "arcsin":
@@ -507,18 +833,18 @@ class pyMethObj():
     
     def likelihood_ratio_test(
             self,
-            coef=None,
-            contrast=None,
-            padjust_method='fdr_bh',
-            find_dmrs='binary_search',
-            prop_sig=0.5,
-            fdr_thresh=0.1,
-            max_gap=10000,
-            max_gap_cpgs=3,
-            min_cpgs=3,
-            n_states=3,
-            state_labels=None,
-            ncpu=1):
+            coef: Optional[Union[str, List[str]]]=None,
+            contrast: Optional[Union[Dict[str, float], np.ndarray]]=None,
+            padjust_method: str='fdr_bh',
+            find_dmrs: str='binary_search',
+            prop_sig: float=0.5,
+            fdr_thresh: float=0.1,
+            max_gap: int=10000,
+            max_gap_cpgs: int=3,
+            min_cpgs: int=3,
+            n_states: int=3,
+            state_labels: Optional[Dict[int, str]]=None,
+            ncpu: int=1) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.DataFrame]]:
         """
         Compute LRT for beta-binomial regression fits via scipy.stats.betabinom.logpmf.
 
@@ -623,20 +949,20 @@ class pyMethObj():
     
     def wald_test(
         self,
-        coef=None,
-        contrast=None,
-        padjust_method='fdr_bh',
-        n_permute=0,
-        find_dmrs='binary_search',
-        prop_sig=0.5,
-        fdr_thresh=0.1,
-        max_gap=10000,
-        max_gap_cpgs=3,
-        min_cpgs=3,
-        n_states=3,
-        state_labels=None,
-        ncpu=1
-    ):
+        coef: Optional[Union[str, List[str]]]=None,
+        contrast: Optional[Union[Dict[str, float], np.ndarray]]=None,
+        padjust_method: str='fdr_bh',
+        n_permute: int=0,
+        find_dmrs: str='binary_search',
+        prop_sig: float=0.5,
+        fdr_thresh: float=0.1,
+        max_gap: int=10000,
+        max_gap_cpgs: int=3,
+        min_cpgs: int=3,
+        n_states: int=3,
+        state_labels: Optional[Dict[int, str]]=None,
+        ncpu: int=1
+    ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.DataFrame]]:
         """
         Perform Wald tests for individual coefficients or user-specified contrasts.
 
@@ -832,8 +1158,13 @@ class pyMethObj():
 
 
     @staticmethod
-    def find_significant_regions(df, prop_sig=0.5, fdr_thresh=0.1, maxthresh=0.2,
-                                max_gap=1000, min_cpgs=3, max_gap_cpgs=2):
+    def find_significant_regions(df: pd.DataFrame,
+                                prop_sig: float = 0.5,
+                                fdr_thresh: float = 0.1,
+                                maxthresh: float = 0.2,
+                                max_gap: int = 1000,
+                                min_cpgs: int = 3,
+                                max_gap_cpgs: int = 2) -> pd.DataFrame:
         """
         Find regions of adjacent CpGs where:
         - The gap between successive CpGs is less than max_gap.
@@ -962,8 +1293,16 @@ class pyMethObj():
 
     
     @staticmethod
-    def find_significant_regions_HMM(cpg_res, n_states=3, min_cpgs=5, fdr_thresh=0.05, prop_sig_thresh=0.5, 
-                                max_gap=5000, state_labels=None, hmm_plots=False, hmm_internals=False, ncpu=4):
+    def find_significant_regions_HMM(cpg_res: pd.DataFrame, 
+                                    n_states: int = 3, 
+                                    min_cpgs: int = 5, 
+                                    fdr_thresh: float = 0.05, 
+                                    prop_sig_thresh: float = 0.5, 
+                                    max_gap: int = 5000, 
+                                    state_labels: Optional[Dict[int, str]] = None, 
+                                    hmm_plots: bool = False, 
+                                    hmm_internals: bool = False, 
+                                    ncpu: int = 4) -> pd.DataFrame:
         """
         Identify candidate DMR regions using an HMM with multiple states and multivariate features.
         Utilizes Ray for parallel processing of chromosomes only, not segments.
@@ -1200,7 +1539,12 @@ class pyMethObj():
         
         return region_res
 
-    def permute_and_refit(self, coef=None, contrast=None, N=100, padjust_method='fdr_bh', ncpu=1):
+    def permute_and_refit(self, 
+                         coef: Optional[Union[str, List[str]]] = None, 
+                         contrast: Optional[Union[Dict[str, float], np.ndarray]] = None, 
+                         N: int = 100, 
+                         padjust_method: str = 'fdr_bh', 
+                         ncpu: int = 1) -> Dict[str, pd.DataFrame]:
         """
         Refit the beta-binomial regression model and compute Wald test statistics N times,
         randomly permuting the labels of a given column in self.X.
@@ -1242,20 +1586,52 @@ class pyMethObj():
         permuted_stats = {"stats": permuted_stats_df, "pval": permuted_pval_df, "fdr": permuted_fdr_df}
         return permuted_stats
 
-    def find_codistrib_regions(self,site_names:np.ndarray=np.array([]),dmrs: bool=True,tol: int=3,min_cpgs: int=3,ncpu: int=1,maxiter=500,maxfev=500,chunksize=1):
+    def find_codistrib_regions(self,
+                              site_names: np.ndarray = np.array([]),
+                              dmrs: bool = True,
+                              tol: int = 3,
+                              min_cpgs: int = 3,
+                              ncpu: int = 1,
+                              maxiter: int = 500,
+                              maxfev: int = 500,
+                              chunksize: int = 1) -> None:
         """
-        Perform differential methylation analysis using beta binomial regression, with an option to compute differentially methylated regions of contigous cpgs whose
-        mean and association with covariates are similar.
+        Identify co-distributed regions of CpGs with similar methylation patterns.
+        
+        This method identifies regions of contiguous CpGs that show similar methylation
+        patterns and statistical properties, suggesting they are co-regulated. It combines
+        CpGs that have similar beta-binomial parameters by testing whether they can be
+        modeled with a single set of parameters without significant loss of fit.
         
         Parameters:
-            site_names (optional: 1D numpy array): Array of same length as number of cpgs in meth/coverage, specifying cpg name. If not provided names each cpg by its index.
-            dmrs (boolean, default: True): Whether to identify and test differentially methylated regions of contigous cpgs whose mean and association with covariates are similar.
-            tol (integer, default: 3): Tolerance for merging of similarly distributed cpgs into regions (higher increases merging).
-            min_cpgs (integer, default: 3): Minimum number of cpgs comprising a dmr for it to be retained.
-            ncpu (integer, default: 1): Number of cpus to use. If > 1 will use a parallel backend with Ray.
-            
+            site_names (numpy array, default: empty array): Optional array containing names for each CpG.
+                Must have the same length as the number of CpGs if provided.
+                If not provided, CpGs will be indexed by their position.
+            dmrs (bool, default: True): Whether to identify differentially methylated regions.
+            tol (int, default: 3): Tolerance factor for merging similar CpGs into regions.
+                Higher values result in more aggressive merging.
+            min_cpgs (int, default: 3): Minimum number of CpGs required to form a region.
+            ncpu (int, default: 1): Number of CPU cores to use for parallel processing.
+                Values > 1 will use Ray for parallelization.
+            maxiter (int, default: 500): Maximum number of iterations for optimization when
+                testing joint models for regions.
+            maxfev (int, default: 500): Maximum number of function evaluations for optimization.
+            chunksize (int, default: 1): Number of regions to process in each parallel task.
+                Larger values may improve performance with many small regions.
+                
         Returns:
-            pandas dataframe(s): Dataframe containing estimates of coeficents for each covariate for each cpg, with a seperate dataframe for region results if dmrs=True. 
+            None: Results are stored in self.codistrib_regions as region labels for each CpG.
+            
+        Notes:
+            - The method compares the fit of modeling CpGs separately versus jointly
+              using the Bayesian Information Criterion (BIC).
+            - CpGs are merged into regions when their joint model doesn't significantly
+              reduce the fit quality compared to individual models.
+            - The 'tol' parameter controls the sensitivity: higher values make the algorithm
+              more likely to merge CpGs into larger regions.
+            - Regions must contain at least min_cpgs+1 CpGs to be considered a valid region.
+            - When parallel processing is used (ncpu > 1), regions are distributed
+              across workers for faster computation.
         """
         
         assert any([len(site_names) == self.ncpgs,len(site_names) == 0]), "length of site_names must be equal to the number of cpgs"
@@ -1301,21 +1677,52 @@ class pyMethObj():
 
     @staticmethod
     @ray.remote
-    def find_codistrib_chunk(region_id,find_codistrib,beta_binomial_log_likelihood,unique,fits,meth,coverage,X_id,X_star_id,tol=3,
-                             min_cpgs=3,maxiter=150,maxfev=150,link="arcsin",fit_method="gls"):
+    def find_codistrib_chunk(region_id: np.ndarray,
+                            find_codistrib: Callable,
+                            beta_binomial_log_likelihood: Callable,
+                            unique: Callable,
+                            fits: List[np.ndarray],
+                            meth: np.ndarray,
+                            coverage: np.ndarray,
+                            X_id: np.ndarray,
+                            X_star_id: np.ndarray,
+                            tol: int = 3,
+                            min_cpgs: int = 3,
+                            maxiter: int = 150,
+                            maxfev: int = 150,
+                            link: str = "arcsin",
+                            fit_method: str = "gls") -> np.ndarray:
         """
-        Fit beta binomial model to a chunk of target regions from DNA methylation data.
-    
+        Process a chunk of regions to identify co-distributed CpG regions in parallel.
+        
+        This remote function is designed to be executed via Ray for parallel processing.
+        It takes a subset of target regions and identifies co-distributed CpG regions
+        within each of them.
+        
         Parameters:
-            chunk_regions (numpy array): Array of region assignments for this chunk.
-            meth_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of methylated reads at each cpg (rows) for each sample (columns).
-            coverage_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of total reads at each cpg (rows) for each sample (columns).
-            region_id (ray ID): ID of global value produced by ray.put(), pointing to a global array of cpg region assignments.
-            maxiter (integer, default: 250): Maxinum number of iterations when fitting beta binomial model to a cpg (see numpy minimize).
-            maxfev (integer, default: 250): Maxinum number of evaluations when fitting beta binomial model to a cpg (see numpy minimize).
+            region_id (numpy array): Array of region assignments for the CpGs in this chunk.
+            find_codistrib (function): Function to identify co-distributed regions.
+            beta_binomial_log_likelihood (function): Function to compute log-likelihood.
+            unique (function): Helper function to get unique elements while preserving order.
+            fits (list): Fitted parameters for CpGs in the target regions.
+            meth (numpy array): Methylation count data for CpGs in the target regions.
+            coverage (numpy array): Coverage count data for CpGs in the target regions.
+            X_id (numpy array): Design matrix for the mean parameter.
+            X_star_id (numpy array): Design matrix for the dispersion parameter.
+            tol (int, default: 3): Tolerance factor for merging similar CpGs.
+            min_cpgs (int, default: 3): Minimum number of CpGs required to form a region.
+            maxiter (int, default: 150): Maximum iterations for optimization.
+            maxfev (int, default: 150): Maximum function evaluations for optimization.
+            link (str, default: "arcsin"): Link function for the mean parameter.
+            fit_method (str, default: "gls"): Method for fitting the model.
             
         Returns:
-            numpy array: Array of optimisation results of length equal to the number of cpgs in this chunk. 
+            numpy array: Array of region labels for each CpG in the processed chunk.
+            
+        Notes:
+            This function is designed to be called via ray.remote to enable parallel
+            processing across multiple cores. It distributes regions to be processed
+            in parallel and aggregates the results.
         """
         codistrib_regions = [find_codistrib(region,beta_binomial_log_likelihood,fits[fit],
                                                  meth[region_id==region],coverage[region_id==region],
@@ -1328,19 +1735,54 @@ class pyMethObj():
 
 
     @staticmethod
-    def find_codistrib_local(region,beta_binomial_log_likelihood,fits,meth,coverage,X,X_star,tol=3,min_cpgs=3,maxiter=500,maxfev=500,
-                             link="arcsin",fit_method="gls"):
+    def find_codistrib_local(region: Union[int, float, str],
+                            beta_binomial_log_likelihood: Callable,
+                            fits: np.ndarray,
+                            meth: np.ndarray,
+                            coverage: np.ndarray,
+                            X: np.ndarray,
+                            X_star: np.ndarray,
+                            tol: int = 3,
+                            min_cpgs: int = 3,
+                            maxiter: int = 500,
+                            maxfev: int = 500,
+                            link: str = "arcsin",
+                            fit_method: str = "gls") -> np.ndarray:
         """
-        Computes differentially methylated regions of contigous cpgs whose mean, dispersion, and association with covariates are similar.
-    
+        Identify co-distributed regions of CpGs within a single target region.
+        
+        This function analyzes contiguous CpGs within a region to identify segments
+        that have similar methylation patterns and can be modeled with a single set 
+        of parameters. It compares the goodness of fit between modeling CpGs separately
+        versus jointly using the Bayesian Information Criterion (BIC).
+        
         Parameters:
-            region (integer, float, or string): Name of the region being analysed.
-            fits (1D numpy array): Array containing bb fits (corcon_2 object) for all cpgs in the region.
-            min_cpgs (integer, default: 3): Minimum length of a dmr.
+            region (int, float, or str): Identifier for the region being analyzed.
+            beta_binomial_log_likelihood (function): Function to compute log-likelihood.
+            fits (numpy array): Array of fitted parameters for CpGs in this region.
+            meth (numpy array): Methylation count data for CpGs in this region.
+            coverage (numpy array): Coverage count data for CpGs in this region.
+            X (numpy array): Design matrix for the mean parameter.
+            X_star (numpy array): Design matrix for the dispersion parameter.
+            tol (int, default: 3): Tolerance factor for merging similar CpGs.
+                Higher values result in more aggressive merging.
+            min_cpgs (int, default: 3): Minimum number of CpGs required to form a region.
+            maxiter (int, default: 500): Maximum iterations for optimization.
+            maxfev (int, default: 500): Maximum function evaluations for optimization.
+            link (str, default: "arcsin"): Link function for the mean parameter.
+            fit_method (str, default: "gls"): Method for fitting the model.
             
         Returns:
-            pandas dataframe(s): Dataframe containing estimates of coeficents for each covariate for each cpg, with a seperate dataframe for region results if dmrs=True. 
-        """  
+            numpy array: Array of region labels for each CpG in the analyzed region.
+            
+        Notes:
+            - The function uses a greedy algorithm that extends regions by adding CpGs
+              one at a time and tests whether the joint model is still adequate.
+            - CpGs are grouped into a region when their joint BIC is better than the
+              penalized BIC of modeling them separately (BIC_separate * tol).
+            - Regions must contain at least min_cpgs+1 CpGs to be considered a valid region.
+            - Regions are labeled with a format: "{region}_{start}-{end}"
+        """
         start=0
         end=2
         codistrib_regions=np.array([])
@@ -1411,19 +1853,50 @@ class pyMethObj():
 
     @staticmethod
     @ray.remote
-    def find_codistrib(region,beta_binomial_log_likelihood,fits,meth,coverage,X,X_star,tol=3,min_cpgs=3,maxiter=500,
-                       maxfev=500,link="arcsin",fit_method="gls"):
+    def find_codistrib(region: Union[int, float, str],
+                      beta_binomial_log_likelihood: Callable,
+                      fits: np.ndarray,
+                      meth: np.ndarray,
+                      coverage: np.ndarray,
+                      X: np.ndarray,
+                      X_star: np.ndarray,
+                      tol: int = 3,
+                      min_cpgs: int = 3,
+                      maxiter: int = 500,
+                      maxfev: int = 500,
+                      link: str = "arcsin",
+                      fit_method: str = "gls") -> np.ndarray:
         """
-        Computes differentially methylated regions of contigous cpgs whose mean, dispersion, and association with covariates are similar.
-    
+        Identify co-distributed regions of CpGs within a single target region using Ray.
+        
+        This remote function is a parallelized version of find_codistrib_local designed
+        to be executed via Ray's distributed computing framework. It analyzes contiguous
+        CpGs within a region to identify segments that share similar methylation patterns.
+        
         Parameters:
-            region (integer, float, or string): Name of the region being analysed.
-            fits (1D numpy array): Array containing bb fits (corcon_2 object) for all cpgs in the region.
-            min_cpgs (integer, default: 3): Minimum length of a dmr.
+            region (int, float, or str): Identifier for the region being analyzed.
+            beta_binomial_log_likelihood (function): Function to compute log-likelihood.
+            fits (numpy array): Array of fitted parameters for CpGs in this region.
+            meth (numpy array): Methylation count data for CpGs in this region.
+            coverage (numpy array): Coverage count data for CpGs in this region.
+            X (numpy array): Design matrix for the mean parameter.
+            X_star (numpy array): Design matrix for the dispersion parameter.
+            tol (int, default: 3): Tolerance factor for merging similar CpGs.
+                Higher values result in more aggressive merging.
+            min_cpgs (int, default: 3): Minimum number of CpGs required to form a region.
+            maxiter (int, default: 500): Maximum iterations for optimization.
+            maxfev (int, default: 500): Maximum function evaluations for optimization.
+            link (str, default: "arcsin"): Link function for the mean parameter.
+            fit_method (str, default: "gls"): Method for fitting the model.
             
         Returns:
-            pandas dataframe(s): Dataframe containing estimates of coeficents for each covariate for each cpg, with a seperate dataframe for region results if dmrs=True. 
-        """  
+            numpy array: Array of region labels for each CpG in the analyzed region.
+            
+        Notes:
+            This function is decorated with @ray.remote to enable distributed processing
+            across multiple cores. The algorithm is identical to find_codistrib_local,
+            but this version is designed for parallel execution within Ray's framework.
+        """
         start=0
         end=2
         codistrib_regions=np.array([])
@@ -1493,16 +1966,45 @@ class pyMethObj():
         return codistrib_regions
     
     @staticmethod
-    def beta_binomial_log_likelihood(count,total,X,X_star,beta,n_param_abd,n_param_disp,
-                                 link="arcsin",max_param=1e+10):
+    def beta_binomial_log_likelihood(count: np.ndarray,
+                                   total: np.ndarray,
+                                   X: np.ndarray,
+                                   X_star: np.ndarray,
+                                   beta: np.ndarray,
+                                   n_param_abd: int,
+                                   n_param_disp: int,
+                                   link: str = "arcsin",
+                                   max_param: float = 1e+10) -> float:
         """
-        Compute the negative log-likelihood for beta-binomial regression.
-    
+        Compute the log-likelihood for beta-binomial regression.
+        
+        This function calculates the log-likelihood of methylation count data under
+        a beta-binomial model with specified parameters. It handles various link functions
+        and includes numerical stability safeguards.
+        
         Parameters:
-            beta (numpy array): Coefficients to estimate (p-dimensional vector).
-            
+            count (array-like): Count of methylated reads for each sample.
+            total (array-like): Total number of reads (coverage) for each sample.
+            X (numpy array): Design matrix for the mean parameter.
+            X_star (numpy array): Design matrix for the dispersion parameter.
+            beta (numpy array): Parameter vector containing concatenated mean (beta_mu)
+                and dispersion (beta_phi) parameters.
+            n_param_abd (int): Number of mean parameters.
+            n_param_disp (int): Number of dispersion parameters.
+            link (str, default: "arcsin"): Link function for the mean parameter.
+                Options: "arcsin" or "logit".
+            max_param (float, default: 1e+10): Maximum allowed value for beta distribution
+                parameters to prevent numerical issues.
+                
         Returns:
-            float: Negative log-likelihood.
+            float: Log-likelihood value of the data under the specified model.
+            
+        Notes:
+            - The function first removes any NaN values from the input data.
+            - It transforms linear predictors to probability space using the specified link function.
+            - Parameters are scaled to avoid numerical overflow in the beta-binomial calculation.
+            - The log-likelihood is computed using scipy.stats.betabinom.logpmf in vectorized form.
+            - A higher log-likelihood indicates a better fit of the model to the data.
         """
         #Remove nans from calculation
         X=X[~np.isnan(total)]
@@ -1541,22 +2043,38 @@ class pyMethObj():
         return log_likelihood
 
     @njit
-    def find_subregions(self, coef,  tol=0.05, max_dist=10000, start_group=0):
+    def find_subregions(self, coef: str, tol: float = 0.05, max_dist: int = 10000, start_group: int = 0) -> np.ndarray:
         """
-        Return an array of segment labels for x such that:
-        - Normally, a new segment is started when the value differs from the current baseline or 
-            the previous value by more than tol.
-        - If a single value exceeds tol but the immediately following value is within tol of the current baseline,
-            the outlier is given a group on its own and the segment continues.
+        Segment CpGs into regions based on parameter similarity using numba-accelerated code.
         
-        Parameters
-        ----------
-        coef : Name of coeficient to find subregions for (in self.param_names_abd)
-        tol : numeric threshold for allowed deviation from the group's baseline and previous value.
+        This method divides CpGs into regions where the specified coefficient has
+        similar values, with boundaries created when values change by more than the
+        tolerance threshold. It also handles isolated outliers by giving them their
+        own regions without breaking the main segment.
         
-        Returns
-        -------
-        labels : 1D numpy array of int64 group labels.
+        Parameters:
+            coef (str): Name of the coefficient to use for segmentation (must be in
+                self.param_names_abd).
+            tol (float, default: 0.05): Tolerance threshold for what constitutes a 
+                significant change in parameter values.
+            max_dist (int, default: 10000): Maximum genomic distance between adjacent
+                CpGs to consider them part of the same region.
+            start_group (int, default: 0): Starting group number for labeling regions.
+                
+        Returns:
+            numpy.ndarray: Array of integer labels assigning each CpG to a region.
+                
+        Notes:
+            - This method is accelerated using numba's just-in-time compilation (@njit).
+            - Segmentation is based on the following rules:
+              * Normal segmentation occurs when a value differs from the baseline or
+                previous value by more than the tolerance.
+              * If a single value exceeds tolerance but the next value returns to baseline,
+                the outlier gets its own group without breaking the main segment.
+              * New segments are also started at chromosome boundaries or when the
+                genomic distance exceeds max_dist.
+            - Useful for identifying regions of similar methylation patterns that may
+              correspond to functional elements.
         """
         if isinstance(coef, str):
             try:
@@ -1600,40 +2118,66 @@ class pyMethObj():
                     outliers=0
         return labels
 
-    def sim_multiple_cpgs(self,covs=None,covs_disp=None,use_codistrib_regions: bool=True,read_depth: str|int|np.ndarray="from_data",vary_read_depth=True,read_depth_sd: str|int|float|np.ndarray="from_data",
-                          adjust_factor: float|list=0, diff_regions_up: list|np.ndarray=[],diff_regions_down: list|np.ndarray=[],n_diff_regions: list|int=0,prop_pos: float=0.5,
-                          sample_size: int=100,ncpu: int=1,chunksize=1):
+    def sim_multiple_cpgs(self,
+                         covs: Optional[Union[pd.DataFrame, np.ndarray]] = None,
+                         covs_disp: Optional[Union[pd.DataFrame, np.ndarray]] = None,
+                         use_codistrib_regions: bool = True,
+                         read_depth: Union[str, int, np.ndarray] = "from_data",
+                         vary_read_depth: bool = True,
+                         read_depth_sd: Union[str, int, float, np.ndarray] = "from_data",
+                         adjust_factor: Union[float, List[float]] = 0,
+                         diff_regions_up: Union[List, np.ndarray] = [],
+                         diff_regions_down: Union[List, np.ndarray] = [],
+                         n_diff_regions: Union[List[int], int] = 0,
+                         prop_pos: float = 0.5,
+                         sample_size: int = 100,
+                         ncpu: int = 1,
+                         chunksize: int = 1) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, np.ndarray, List]]:
         """
-        Simulate new samples based on existing samples.
-    
+        Simulate methylation data based on fitted beta-binomial models.
+        
+        This method generates simulated methylation count data based on the parameters
+        estimated from real data, with options to modify methylation levels in specific
+        regions. It can be used for power analysis, benchmarking, or exploring the
+        effects of differential methylation.
+        
         Parameters:
-            covs (optional: pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the simulated samples for the 
-            mean parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            If not supplied will form an intercept column, and level 0 for all other covariates.
-            covs_disp (optional: pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion parameter, 
-            with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            If not supplied will form an intercept column, and level 0 for all other covariates.
-            use_codistrib_regions (bool, default: True): Whether to adjust whole codistributed regions (True) or single cpgs (False) by adjust_factor. Need to run bbseq()
-            to set True.
-            read_depth (integer or "from_data", default: "from_data"): Desired average read depth of simulated samples. If "from_data" calculates average read depth per region
-            from object data, and uses this as read_depth for simulations.
-            vary_read_depth (boolean, default: True): Whether to vary sample read depth per sample (if false all coverage values will equal 'read_depth')
-            read_depth_sd (integer or "from_data", default: "from_data"): Desired average standard deviation read depth between simulated samples. If "from_data" calculates average SD of read depth 
-            per region between samples in object data, and uses this as read_depth_sd for simulations.
-            adjust_factor (float 0-1, default: 0): The percent methylation 'diff_regions' or 'n_diff_regions' will be altered by in simulated samples.
-            diff_regions_up (List or numpy array, default: []): Names of regions whose probability of methylation will be increased by 'adjust_factor'.
-            diff_regions_down (List or numpy array, default: []): Names of regions whose probability of methylation will be decreased by 'adjust_factor'.
-            n_diff_regions (integer or list, default: 0): If diff_regions not specified, the number of regions to be affected by 'adjust_factor'. Can be a list of length 2 specifying number regions to increase
-            or decrease in methylation.
-            and ne
-            prop_pos (Float 0-1, default: 0.5): Which proportion of adjusted regions should be increased in methylation, versus decreased.
-            sample_size (integer, default: 100): Number of samples to simulate.
-            ncpu (integer, default: 1): Number of cpus to use. If > 1 will use a parallel backend with Ray.
-            
+            covs (pandas DataFrame or None, default: None): Design matrix for the mean parameter
+                in the simulated data. If None, all covariates except intercept are set to 0.
+            covs_disp (pandas DataFrame or None, default: None): Design matrix for the dispersion
+                parameter. If None, all covariates except intercept are set to 0.
+            use_codistrib_regions (bool, default: True): Whether to modify methylation in whole
+                co-distributed regions (True) or individual CpGs (False).
+            read_depth (str, int, or numpy array, default: "from_data"): Read depth for simulated data.
+                If "from_data", uses average depths from the original data.
+            vary_read_depth (bool, default: True): Whether to add variation to read depths.
+            read_depth_sd (str, int, float, or numpy array, default: "from_data"): Standard deviation
+                of read depths. If "from_data", uses the observed SD from original data.
+            adjust_factor (float or list, default: 0): Amount to adjust methylation probability in
+                differential regions. If list, specifies [increase, decrease] amounts.
+            diff_regions_up (list or numpy array, default: []): Names of regions to increase methylation.
+            diff_regions_down (list or numpy array, default: []): Names of regions to decrease methylation.
+            n_diff_regions (int or list, default: 0): Number of random regions to differentially methylate.
+                If list, specifies [n_up, n_down].
+            prop_pos (float, default: 0.5): Proportion of differentially methylated regions to
+                increase (vs. decrease) when using n_diff_regions.
+            sample_size (int, default: 100): Number of samples to simulate.
+            ncpu (int, default: 1): Number of CPU cores for parallel processing.
+            chunksize (int, default: 1): Number of regions to process in each parallel task.
+                
         Returns:
-            2D numpy array,2D numpy array: Arrays containing simulated methylated counts, total counts for simulated samples. 
+            tuple: If adjust_factor is 0, returns (simulated methylation counts, simulated coverage).
+                  Otherwise, returns (simulated methylation counts, simulated coverage,
+                  adjustment factors, list of modified regions).
+                
+        Notes:
+            - Requires the model to be fitted first (self.fits must be populated).
+            - Simulates data using the same beta-binomial model used for fitting.
+            - When use_codistrib_regions=True and n_diff_regions>0, automatically selects
+              suitable regions for modification based on their current methylation levels
+              and dispersion parameters.
+            - Parallelization via Ray is used when ncpu > 1.
         """
-
         assert len(self.fits) == len(self.individual_regions), "Run fit before simulating"
         if not isinstance(read_depth,np.ndarray):
             assert any([read_depth == "from_data", isinstance(read_depth,(list,int))]), "read_depth must be 'from_data' or a positive integer"
@@ -1697,7 +2241,7 @@ class pyMethObj():
 
         adjust_factors = np.repeat(0.0, self.ncpgs)
         if use_codistrib_regions:
-            assert len(self.codistrib_regions) == self.ncpgs, "Run bbseq before simulating if codistrib_regions=True"
+            assert len(self.codistrib_regions) == self.ncpgs, "Run bbseq with dmrs=True to find codistributed regions before setting show_codistrib_regions=True"
             if len(diff_regions_up)>0 or len(diff_regions_down)>0 or n_pos>0 or n_neg>0:
                 if all([len(diff_regions_up)==0,len(diff_regions_down)==0, any([n_pos>0 or n_neg>0])]):
                     self.codistrib_regions_only = np.array([region for region in self.unique(self.codistrib_regions) if "_" in region])
@@ -1750,20 +2294,45 @@ class pyMethObj():
 
     @staticmethod
     @ray.remote
-    def sim_chunk(region_id,fits,covs,covs_disp,sim_local,read_depth,vary_read_depth,read_depth_sd,adjust_factors,sample_size=100,link="arcsin"):
+    def sim_chunk(region_id: Union[List, np.ndarray],
+                 fits: List[np.ndarray],
+                 covs: pd.DataFrame,
+                 covs_disp: pd.DataFrame,
+                 sim_local: Callable,
+                 read_depth: Union[np.ndarray, List[int]],
+                 vary_read_depth: bool,
+                 read_depth_sd: Union[np.ndarray, List[float]],
+                 adjust_factors: Union[np.ndarray, List[float]],
+                 sample_size: int = 100,
+                 link: str = "arcsin") -> Tuple[np.ndarray, np.ndarray]:
         """
-        Fit beta binomial model to a chunk of target regions from DNA methylation data.
-    
+        Simulate data for a chunk of regions in parallel using Ray.
+        
+        This remote function simulates methylation data for a set of target regions
+        in parallel. It's designed to be executed within Ray's distributed computing
+        framework for efficient parallel processing of large datasets.
+        
         Parameters:
-            chunk_regions (numpy array): Array of region assignments for this chunk.
-            meth_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of methylated reads at each cpg (rows) for each sample (columns).
-            coverage_id (ray ID): ID of global value produced by ray.put(), pointing to a global count table of total reads at each cpg (rows) for each sample (columns).
-            region_id (ray ID): ID of global value produced by ray.put(), pointing to a global array of cpg region assignments.
-            maxiter (integer, default: 250): Maxinum number of iterations when fitting beta binomial model to a cpg (see numpy minimize).
-            maxfev (integer, default: 250): Maxinum number of evaluations when fitting beta binomial model to a cpg (see numpy minimize).
+            region_id (array-like): Identifiers for the regions in this chunk.
+            fits (list): Fitted model parameters for each region in the chunk.
+            covs (pandas DataFrame): Design matrix for the mean parameter.
+            covs_disp (pandas DataFrame): Design matrix for the dispersion parameter.
+            sim_local (function): Function to simulate data for a single region.
+            read_depth (array-like): Read depths for each region in the chunk.
+            vary_read_depth (bool): Whether to add variation to read depths.
+            read_depth_sd (array-like): Standard deviations for read depths.
+            adjust_factors (array-like): Methylation adjustment factors for each CpG in each region.
+            sample_size (int, default: 100): Number of samples to simulate.
+            link (str, default: "arcsin"): Link function used in the model.
             
         Returns:
-            numpy array: Array of optimisation results of length equal to the number of cpgs in this chunk. 
+            tuple: Contains two numpy arrays - simulated methylation counts and
+                  simulated coverage counts for all regions in the chunk.
+                  
+        Notes:
+            This function is decorated with @ray.remote to enable distributed processing
+            across multiple cores. It applies the simulation function to each region
+            in the chunk and combines the results.
         """
         sim_meth, sim_coverage = zip(*[sim_local(fits[region_num],covs,covs_disp,
                                                           read_depth[region_num],vary_read_depth,read_depth_sd[region_num],
@@ -1774,25 +2343,45 @@ class pyMethObj():
         
         return sim_meth, sim_coverage
 
-    def sim_local(self,region_num,X,X_star,read_depth=30,vary_read_depth=True,read_depth_sd=2,adjust_factors=0,sample_size=100):
+    def sim_local(self,
+                 region_num: int,
+                 X: Union[pd.DataFrame, np.ndarray],
+                 X_star: Union[pd.DataFrame, np.ndarray],
+                 read_depth: int = 30,
+                 vary_read_depth: bool = True,
+                 read_depth_sd: float = 2,
+                 adjust_factors: Union[float, np.ndarray] = 0,
+                 sample_size: int = 100) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Simulate new samples based on existing samples, for this region.
-    
+        Simulate methylation data for a single region using object's parameters.
+        
+        This method generates simulated methylation data for a specific region using
+        the fitted parameters stored in the object. It uses the beta-binomial model
+        to generate random counts that follow the statistical properties of the
+        original data.
+        
         Parameters:
-            params (numpy array): Array of paramether estimates (columns) for each cpg in the region (rows). 
-            X (pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the simulated samples for the 
-            mean parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            X_star (pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion parameter, 
-            with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            read_depth (integer, default: 30): Desired average read depth of simulated samples.
-            vary_read_depth (boolean, default: True): Whether to vary sample read depth per sample (if false all coverage values will equal 'read_depth')
-            read_depth_sd (float or integer, default: 5): The standard deviation to vary read depth by, using a normal distribution with mean 'read_depth'.
-            adjust_factors (1D numpy array, default: 0): Array of the percent methylation each cpg will be altered by in the simulated versus template samples.
-            sample_size (integer, default: 100): Number of samples to simulate.
-            link (string, default: "arcsin"): Link function to use, either 'arcsin' or 'logit'.
+            region_num (int): Index of the region to simulate data for.
+            X (pandas DataFrame): Design matrix for the mean parameter.
+            X_star (pandas DataFrame): Design matrix for the dispersion parameter.
+            read_depth (int, default: 30): Mean read depth for the simulated data.
+            vary_read_depth (bool, default: True): Whether to vary read depths across samples.
+            read_depth_sd (float, default: 2): Standard deviation for read depth variation.
+            adjust_factors (array-like, default: 0): Adjustment factors for methylation
+                probability for each CpG in the region.
+            sample_size (int, default: 100): Number of samples to simulate.
             
         Returns:
-            2D numpy array,2D numpy array: Arrays containing simulated methylated counts, total counts for simulated samples. 
+            tuple: Contains two numpy arrays - simulated methylation counts and
+                  simulated coverage counts for the region.
+                  
+        Notes:
+            - Uses the object's fitted parameters for the specified region.
+            - Applies the object's link function to transform linear predictors.
+            - If adjust_factors contains non-zero values, methylation probabilities
+              are adjusted accordingly, allowing simulation of differential methylation.
+            - Read depths are randomly generated from a normal distribution when
+              vary_read_depth is True.
         """
         params=self.fits[region_num]
         if vary_read_depth: # Create array of sample read depths, varying read depth if specified to
@@ -1834,24 +2423,45 @@ class pyMethObj():
 
     @staticmethod
     @ray.remote
-    def sim(params,X,X_star,read_depth=30,vary_read_depth=True,read_depth_sd=2,adjust_factors=0,sample_size=100,link="arcsin"):
+    def sim(params: np.ndarray,
+           X: Union[pd.DataFrame, np.ndarray],
+           X_star: Union[pd.DataFrame, np.ndarray],
+           read_depth: int = 30,
+           vary_read_depth: bool = True,
+           read_depth_sd: float = 2,
+           adjust_factors: Union[float, np.ndarray] = 0,
+           sample_size: int = 100,
+           link: str = "arcsin") -> Tuple[np.ndarray, np.ndarray]:
         """
-        Simulate new samples based on existing samples, for this region.
-    
+        Simulate methylation data for a region using Ray for parallel processing.
+        
+        This remote function generates simulated methylation data for a region with
+        the provided parameters. It's designed to be executed within Ray's distributed
+        computing framework for parallel processing across multiple cores.
+        
         Parameters:
-            params (numpy array): Array of paramether estimates (columns) for each cpg in the region (rows). 
-            X (pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the simulated samples for the 
-            mean parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            X_star (pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion parameter, 
-            with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            read_depth (integer, default: 30): Desired average read depth of simulated samples.
-            vary_read_depth (boolean, default: True): Whether to vary sample read depth per sample (if false all coverage values will equal 'read_depth')
-            read_depth_sd (float or integer, default: 5): The standard deviation to vary read depth by, using a normal distribution with mean 'read_depth'.
-            adjust_factors (1D numpy array, default: 0): Array of the log2FoldChange each cpg will be altered by in the simulated versus template samples.
-            sample_size (integer, default: 100): Number of samples to simulate.
+            params (numpy array): Array of fitted parameters (rows: CpGs, columns: parameters).
+            X (numpy array): Design matrix for the mean parameter.
+            X_star (numpy array): Design matrix for the dispersion parameter.
+            read_depth (int, default: 30): Mean read depth for the simulated data.
+            vary_read_depth (bool, default: True): Whether to vary read depths across samples.
+            read_depth_sd (float, default: 2): Standard deviation for read depth variation.
+            adjust_factors (array-like, default: 0): Adjustment factors for methylation
+                probability for each CpG in the region.
+            sample_size (int, default: 100): Number of samples to simulate.
+            link (str, default: "arcsin"): Link function for transforming linear predictors.
             
         Returns:
-            2D numpy array,2D numpy array: Arrays containing simulated methylated counts, total counts for simulated samples. 
+            tuple: Contains two numpy arrays - simulated methylation counts and
+                  simulated coverage counts for the region.
+                  
+        Notes:
+            This function is decorated with @ray.remote to enable distributed processing.
+            It performs the same simulation process as sim_local and sim_internal, but
+            is designed to be called remotely via Ray's distributed computing framework.
+            
+            The beta-binomial distribution is used to generate counts that reflect both
+            the expected methylation probability and the expected biological variation.
         """
         if vary_read_depth: # Create array of sample read depths, varying read depth if specified to
             read_depth = np.random.normal(read_depth,read_depth_sd,sample_size).astype(int)
@@ -1891,25 +2501,47 @@ class pyMethObj():
         return meth, coverage
 
     @staticmethod
-    def sim_internal(params,X,X_star,read_depth=30,vary_read_depth=True,read_depth_sd=2,adjust_factors=0,sample_size=100,link="arcsin"):
+    def sim_internal(params: np.ndarray,
+                    X: Union[pd.DataFrame, np.ndarray],
+                    X_star: Union[pd.DataFrame, np.ndarray],
+                    read_depth: int = 30,
+                    vary_read_depth: bool = True,
+                    read_depth_sd: float = 2,
+                    adjust_factors: Union[float, np.ndarray] = 0,
+                    sample_size: int = 100,
+                    link: str = "arcsin") -> Tuple[np.ndarray, np.ndarray]:
         """
-        Simulate new samples based on existing samples, for this region.
-    
+        Simulate methylation data for internal processing using shared parameters.
+        
+        This utility function generates simulated methylation data for regions during
+        parallel processing. It shares the same core functionality as sim and sim_local 
+        but is designed for direct use within the parallel processing framework.
+        
         Parameters:
-            params (numpy array): Array of paramether estimates (columns) for each cpg in the region (rows). 
-            X (pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the simulated samples for the 
-            mean parameter, with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            X_star (pandas dataframe): Dataframe shape (number samples, number covariates) specifying the covariate design matrix for the dispersion parameter, 
-            with a seperate column for each covariate (catagorical covariates should be one-hot encoded), including intercept (column of 1's named 'intercept').
-            read_depth (integer, default: 30): Desired average read depth of simulated samples.
-            vary_read_depth (boolean, default: True): Whether to vary sample read depth per sample (if false all coverage values will equal 'read_depth')
-            read_depth_sd (float or integer, default: 5): The standard deviation to vary read depth by, using a normal distribution with mean 'read_depth'.
-            adjust_factors (1D numpy array, default: 0): Array of the percent methylation each cpg will be altered by in the simulated versus template samples.
-            sample_size (integer, default: 100): Number of samples to simulate.
-            link (string, default: "arcsin"): Link function to use, either 'arcsin' or 'logit'.
+            params (numpy array): Array of fitted parameters (rows: CpGs, columns: parameters).
+            X (numpy array): Design matrix for the mean parameter.
+            X_star (numpy array): Design matrix for the dispersion parameter.
+            read_depth (int, default: 30): Mean read depth for the simulated data.
+            vary_read_depth (bool, default: True): Whether to vary read depths across samples.
+            read_depth_sd (float, default: 2): Standard deviation for read depth variation.
+            adjust_factors (array-like, default: 0): Adjustment factors for methylation
+                probability for each CpG in the region.
+            sample_size (int, default: 100): Number of samples to simulate.
+            link (str, default: "arcsin"): Link function for transforming linear predictors.
             
         Returns:
-            2D numpy array,2D numpy array: Arrays containing simulated methylated counts, total counts for simulated samples. 
+            tuple: Contains two numpy arrays - simulated methylation counts and
+                  simulated coverage counts for the region.
+                  
+        Notes:
+            - This function handles the core simulation logic that's shared across
+              the various simulation methods (local, parallel, and chunked).
+            - Simulated data follows a beta-binomial distribution with parameters
+              derived from the fitted model parameters.
+            - Methylation probabilities can be adjusted using adjust_factors to
+              simulate differential methylation.
+            - Coverage depth can be fixed or randomly varied based on the vary_read_depth
+              parameter.
         """
         if vary_read_depth: # Create array of sample read depths, varying read depth if specified to
             read_depth = np.random.normal(read_depth,read_depth_sd,sample_size).astype(int)
@@ -1948,18 +2580,48 @@ class pyMethObj():
 
         return meth, coverage
 
-    def region_plot(self,region: int,contrast: str|list="",beta_vals: np.ndarray=np.array([]),show_codistrib_regions=True,dmrs=None,smooth=False):
+    def region_plot(self,
+                   region: int,
+                   contrast: Union[str, List] = "",
+                   beta_vals: np.ndarray = np.array([]),
+                   show_codistrib_regions: bool = True,
+                   dmrs: Optional[pd.DataFrame] = None,
+                   smooth: bool = False) -> None:
         """
-        Plot methylation level within a region.
-    
+        Plot methylation levels across a genomic region with optional grouping and highlighting.
+        
+        This method creates a visualization of methylation patterns within a specific region.
+        It can display raw beta values or model-smoothed estimates, highlight co-distributed
+        regions or DMRs, and separate samples into groups based on a contrast variable.
+        
         Parameters:
-            region (float, integer, or string): Name of this region.
-            contrast (optional: string): Name of column in self.X (covs) or list denoting group membership. Groups methylation levels over a region will be plotted as seperate lines.
-            beta_vals (optional: np.array): Optional array of beta values to plot if wishing to plot samples not in object (e.g. simulated samples). Must have equal number of cpgs (rows)
-            to the meth and coverage data input to the object (object.ncpgs).
-            show_codistrib_regions (bool, default: True): Whether to show codistributed regions as shaded areas on the plot.
+            region (int, float, or str): Identifier for the region to plot.
+            contrast (str or list, default: ""): Variable to group samples by. Can be a column
+                name from the design matrix (self.X) or a list of group assignments.
+                When provided, separate lines are drawn for each group.
+            beta_vals (numpy array, default: empty array): Optional array of beta values to plot.
+                Used for plotting simulated or external methylation data. Must have the same
+                number of CpGs as the original data if provided.
+            show_codistrib_regions (bool, default: True): Whether to highlight co-distributed
+                regions identified by find_codistrib_regions as colored background spans.
+            dmrs (pandas DataFrame or None, default: None): Optional DataFrame of DMRs with
+                columns 'chr', 'start', and 'end' to highlight on the plot instead of
+                co-distributed regions.
+            smooth (bool, default: False): Whether to plot model-smoothed methylation estimates
+                instead of raw beta values.
+                
+        Returns:
+            None: Displays a plot using matplotlib/seaborn.
+            
+        Notes:
+            - If genomic positions are available, the x-axis represents genomic coordinates;
+              otherwise, it shows CpG indices.
+            - Co-distributed regions or DMRs are shown as color-coded background spans.
+            - Points are plotted at each CpG position and connected with lines.
+            - For grouped data, separate lines are shown for each group with a legend.
+            - The method automatically handles missing values and ensures appropriate
+              data ranges for visualization.
         """
-
         if dmrs is not None:
             assert isinstance(dmrs, pd.DataFrame), "dmrs must be a pandas dataframe"
             assert all(col in dmrs.columns for col in ["start", "end"]), "dmrs must contain columns named 'start' and 'end'"
@@ -2054,36 +2716,96 @@ class pyMethObj():
         plt.xlabel(xlab)
 
     @staticmethod
-    def unique(sequence):
+    def unique(sequence: Any) -> List:
         """
-        Return unique elements of a list in the same order as their first occurance in the original list.
-    
+        Return unique elements of a list while preserving their original order.
+        
+        This utility function removes duplicate elements from a sequence while
+        maintaining the order in which elements first appeared. Unlike set() which
+        doesn't preserve order, this function ensures the order of first appearance
+        is maintained.
+        
         Parameters:
-            sequence (list): List
+            sequence (list or array-like): The input sequence to deduplicate.
             
         Returns:
-            List: Deduplicated list in the same order as items first occurance in the original list.
+            list: A list of unique elements in their original order of first appearance.
+            
+        Notes:
+            - This is implemented using a set to track seen elements for O(1) lookups.
+            - The function processes the sequence in one pass, with O(n) time complexity.
+            - Order preservation can be important for certain operations where the
+              ordering of elements carries meaning (like region identifiers).
+            
+        Example:
+            >>> unique([3, 1, 2, 1, 5, 3])
+            [3, 1, 2, 5]
         """
         seen = set()
         return [x for x in sequence if not (x in seen or seen.add(x))]
 
     @staticmethod
     @ray.remote
-    def sum_regions(array):
+    def sum_regions(array: np.ndarray) -> np.ndarray:
         """
-        Aggregates array values within predefined regions.
-    
+        Aggregate values across columns within an array using Ray for parallel processing.
+        
+        This remote function computes column-wise means for a given array while
+        handling missing values. It's designed for parallel aggregation of data
+        in distributed computing environments using Ray.
+        
         Parameters:
-            regions (numpy array): Regions each column of array belongs to (p-dimensional vector).
-            array (numpy array): Array to be summarised.
-            return_order (boolean, default: False): Whether to return the order of regions in the summarised array (can change from regions).
+            array (numpy array): Array to be summarized across columns.
             
         Returns:
-            numpy array: Summarised Array.
+            numpy array: Column means of the input array, ignoring NaN values.
+            
+        Notes:
+            - This function is decorated with @ray.remote to enable distributed processing
+              across multiple cores.
+            - NaN values are handled gracefully using numpy's nanmean function.
+            - Typically used to aggregate methylation metrics (like beta values)
+              across samples within regions.
+            - This function is most efficiently used when processing large arrays
+              that benefit from parallelization.
         """
         return np.nanmean(array, axis=1)
 
-    def min_max(self,region,param_type="abd",type="both"):
+    def min_max(self,
+               region: str,
+               param_type: str = "abd",
+               type: str = "both") -> Union[Tuple[float, float], float]:
+        """
+        Calculate minimum and/or maximum parameter values for a co-distributed region.
+        
+        This utility method extracts and transforms parameter estimates for a specified
+        co-distributed region and returns their minimum and/or maximum values. It's
+        primarily used to determine the range of methylation probabilities within
+        a region for simulation and visualization purposes.
+        
+        Parameters:
+            region (str): Identifier for the co-distributed region, formatted as
+                "{region_id}_{start}-{end}".
+            param_type (str, default: "abd"): Type of parameter to extract:
+                - "abd": Abundance/methylation parameter (typically intercept)
+                - Any other value: Dispersion parameter
+            type (str, default: "both"): Which value(s) to return:
+                - "both": Return (min, max) as a tuple
+                - "max": Return only the maximum value
+                
+        Returns:
+            tuple or float: Depending on the 'type' parameter:
+                - If type="both": (minimum value, maximum value)
+                - If type="max": maximum value only
+                
+        Notes:
+            - This method parses the region identifier to extract the base region ID,
+              start position, and end position.
+            - Parameters are transformed from link space to probability space using
+              the appropriate link function (arcsin or logit).
+            - Primarily used when selecting regions for simulation of differential
+              methylation to ensure valid probabilities after adjustments.
+        """
         split = region.split("_")
         region = int(split[0])
         split = split[1].split("-")
@@ -2104,11 +2826,11 @@ class pyMethObj():
         elif type=="max":
             return params.max()
         
-    def copy(self):
+    def copy(self) -> 'pyMethObj':
         """
-        Create a deep copy of the pyMethObj instance.
+        Create a copy of the pyMethObj instance.
 
         Returns:
-            pyMethObj: A deep copy of the current instance.
+            pyMethObj: A copy of the current instance.
         """
         return copy.deepcopy(self)
