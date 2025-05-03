@@ -1302,7 +1302,7 @@ class pyMethObj():
                                     state_labels: Optional[Dict[int, str]] = None, 
                                     hmm_plots: bool = False, 
                                     hmm_internals: bool = False, 
-                                    ncpu: int = 4) -> pd.DataFrame:
+                                    ncpu: int = 1) -> pd.DataFrame:
         """
         Identify candidate DMR regions using an HMM with multiple states and multivariate features.
         Utilizes Ray for parallel processing of chromosomes only, not segments.
@@ -1352,7 +1352,7 @@ class pyMethObj():
             ray.init(num_cpus=ncpu)
         
         @ray.remote
-        def process_chromosome(chrom_group, cpg_res_full):
+        def process_chromosome(chrom_group, cpg_res_full,hmm_internals=False, hmm_plots=False):
             """Process a single chromosome's CpGs to identify DMR regions"""
             group = chrom_group.sort_values('pos').reset_index(drop=True)
             chrom = group['chr'].iloc[0]
@@ -1362,12 +1362,12 @@ class pyMethObj():
             
             # Initialize a Gaussian HMM with three states and diagonal covariance
             model = hmm.GaussianHMM(n_components=n_states, covariance_type="diag", 
-                                n_iter=100, random_state=42, init_params="c")
+                                n_iter=100, random_state=42, init_params="")
             
             model.transmat_ = np.array([
                 [0.9999, 0.00005, 0.00005],  # From background
-                [0.005, 0.99, 0.005],        # From hyper
-                [0.005, 0.005, 0.99]         # From hypo
+                [0.01, 0.99, 0],        # From hyper
+                [0.01, 0, 0.99]         # From hypo
             ])
             
             # Initialize means
@@ -1518,7 +1518,7 @@ class pyMethObj():
         # Process each chromosome in parallel
         chrom_tasks = []
         for chrom, group in cpg_res.groupby('chr'):
-            chrom_tasks.append(process_chromosome.remote(group, cpg_res))
+            chrom_tasks.append(process_chromosome.remote(group, cpg_res,hmm_internals=hmm_internals, hmm_plots=hmm_plots))
         
         # Collect results
         chrom_results = ray.get(chrom_tasks)
