@@ -3,7 +3,7 @@ from numba import njit
 import pandas as pd
 from pandas.api.types import is_integer_dtype
 from scipy.optimize import minimize,Bounds
-from scipy.stats import betabinom,norm,chi2,rankdata
+from scipy.stats import betabinom,norm,chi2,rankdata,dirichlet_multinomial
 from scipy.special import gammaln,binom,beta,logit,expit,digamma,polygamma
 from statsmodels.stats.multitest import multipletests
 from statsmodels.genmod.families.links import Link
@@ -899,7 +899,6 @@ class pyMethObj():
             coef_indices = np.where(np.in1d(self.param_names, coef))[0]
         elif contrast is not None:
             coef_indices = np.where(np.in1d(self.param_names, list(contrast.keys())))[0]
-
         reduced_X = np.delete(self.X, coef_indices, axis=1)
         params_red = np.vstack(self.fit_betabinom(X=reduced_X,return_params=True,ncpu=ncpu))
         beta_mu_red = params_red[:,:reduced_X.shape[1]]
@@ -936,7 +935,7 @@ class pyMethObj():
 
         if find_dmrs == 'binary_search':
             dmr_res = self.find_significant_regions(cpg_res,prop_sig=prop_sig,fdr_thresh=fdr_thresh,max_gap=max_gap,
-                                                    max_gap_cpgs=max_gap_cpgs, coef=coef_indices)
+                                                    max_gap_cpgs=max_gap_cpgs, coef=coef_indices, test_use="lrt")
             return cpg_res, dmr_res
         
         elif find_dmrs == 'HMM':
@@ -1115,7 +1114,7 @@ class pyMethObj():
             
         if find_dmrs == 'binary_search':
             dmr_res = self.find_significant_regions(res,prop_sig=prop_sig,fdr_thresh=fdr_thresh,max_gap=max_gap,
-                                                    max_gap_cpgs=max_gap_cpgs,coef=idx)
+                                                    max_gap_cpgs=max_gap_cpgs,C=C)
             if (n_permute > 1) and (not dmr_res.empty):
                 permuted_dmrs = []
                 for perm in range(n_permute):
@@ -1159,14 +1158,17 @@ class pyMethObj():
 
     def find_significant_regions(self,
                                  df: pd.DataFrame,
-                                 coef: str = None,
                                  prop_sig: float = 0.5,
                                  fdr_thresh: float = 0.1,
-                                 maxthresh: float = 0.2,
-                                 max_gap: int = 1000,
+                                 maxthresh: float = 0.5,
+                                 max_gap: int = 10000,
                                  min_cpgs: int = 3,
                                  max_gap_cpgs: int = 2,
-                                 test_sig: bool = True) -> pd.DataFrame:
+                                 test_sig: bool = True,
+                                 coef: str = None,
+                                 C: np.array = None,
+                                 padjust_method: str = 'fdr_bh',
+                                 test_use: str = "wald") -> pd.DataFrame:
         """
         Find regions of adjacent CpGs where:
         - The gap between successive CpGs is less than max_gap.
@@ -1187,11 +1189,16 @@ class pyMethObj():
             min_cpgs (int): Minimum number of CpGs required in a region.
             max_gap_cpgs (int): Maximum number of adjacent non-significant CpGs allowed in a region.
             test_sig (bool): If True, perform a significance test on the region, using a mixed-effects model 
-            accounting for CpG covariance.
+                accounting for CpG covariance.
+            coef (str): Name of the coefficient to test, if test_sig is True. 
+            C (str): Contrast matrix for the test, if test_sig is True.
+            padjust_method (str): Method for adjusting p-values, if test_sig is True.
+            test_use (str): Method for testing significance, if test_sig is True.
         
         Returns:
             pd.DataFrame: DataFrame with columns 'chr', 'start', 'end', 'num_cpgs',
-                        'num_sig_cpgs', and 'prop_sig_cpgs' for each region.
+                        'num_sig_cpgs', and 'prop_sig_cpgs' for each region. Additionally,
+                        if test_sig is True, columns 'Z', 'pval', and 'fdr' are included.
         """
         significant_regions = []
         
@@ -1213,7 +1220,7 @@ class pyMethObj():
                     i += 1
                     continue
                 
-                # Extend the region as far as possible from the starting point i.
+                # Extend the region as far as possible from the starting point i, in both directions.
                 j_max = i
                 while j_max + 1 < n:
                     # Check the gap constraint.
@@ -1279,7 +1286,8 @@ class pyMethObj():
                     num_cpgs = len(best_region)
                     final_prop = best_num_sig / num_cpgs if num_cpgs > 0 else 0
                     if test_sig:
-                        region_res = FitRegion(X = np.repeat(self.X, num_cpgs, axis=0), 
+                        X = np.repeat(self.X, num_cpgs, axis=0)
+                        region_res = FitRegion(X = X, 
                                                count = self.meth[(self.chr == chr_name) & 
                                                                  (self.genomic_positions >= best_region['pos'].iloc[0]) &
                                                                  (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten(), 
@@ -1288,18 +1296,86 @@ class pyMethObj():
                                                                  (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten(), 
                                                cpg_idx = np.tile(np.arange(num_cpgs), self.X.shape[0]), 
                                                sample_idx = np.repeat(np.arange(self.X.shape[0]), num_cpgs)).fit()
-                        Z = region_res['beta'][coef] / region_res['se'][coef]
-                        pval = 2  * norm.sf(np.abs(Z))
-                        significant_regions.append({
-                            'chr': chr_name,
-                            'start': best_region['pos'].iloc[0],
-                            'end': best_region['pos'].iloc[-1],
-                            'num_cpgs': num_cpgs,
-                            'num_sig_cpgs': best_num_sig,
-                            'prop_sig_cpgs': final_prop,
-                            'stat': Z[0],
-                            'pval': pval[0],
-                        })
+                        if test_use == "wald":
+                            if coef is not None:
+                                effect = np.array([(region_res['beta'][coef]).sum()])
+                                var_effect = np.array([(region_res['se'][coef]**2).sum()])
+                            elif C is not None:
+                                effect = (region_res['beta'] * C).sum(axis=1)
+                                var_effect = (region_res['se']**2 * C**2).sum(axis=1)
+                            stat = effect / np.sqrt(var_effect)
+                            pval = 2 * norm.sf(np.abs(stat))
+                            fdr = multipletests(pval, method=padjust_method)[1]
+
+                            significant_regions.append({
+                                'chr': chr_name,
+                                'start': best_region['pos'].iloc[0],
+                                'end': best_region['pos'].iloc[-1],
+                                'num_cpgs': num_cpgs,
+                                'num_sig_cpgs': best_num_sig,
+                                'prop_sig_cpgs': final_prop,
+                                'stat': stat[0],
+                                'pval': pval[0],
+                            })
+                        elif test_use == "lrt":
+                            X_red = np.delete(self.X, coef, axis=1) # drop column `coef` from design
+                            params_red = FitRegion(X = np.repeat(X_red, num_cpgs, axis=0), 
+                                               count = self.meth[(self.chr == chr_name) & 
+                                                                 (self.genomic_positions >= best_region['pos'].iloc[0]) &
+                                                                 (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten(), 
+                                               total = self.coverage[(self.chr == chr_name) & 
+                                                                 (self.genomic_positions >= best_region['pos'].iloc[0]) &
+                                                                 (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten(), 
+                                               cpg_idx = np.tile(np.arange(num_cpgs), self.X.shape[0]), 
+                                               sample_idx = np.repeat(np.arange(self.X.shape[0]), num_cpgs)).fit()
+                            beta_mu = np.tile(region_res['beta'], (num_cpgs, 1))
+                            mu_wlink = self.X @ beta_mu.T
+                            prob_full = ((np.sin(mu_wlink) + 1) / 2) 
+                            beta_mu_red = np.tile(params_red["beta"], (num_cpgs, 1))
+                            mu_wlink_red = X_red @ beta_mu_red.T
+                            prob_red = ((np.sin(mu_wlink_red) + 1) / 2) 
+
+                            # Method-of-moments to alpha, beta: total = 1/phi - 1
+                            phi_inv = (1/region_res['phi']) - 1
+                            phi_inv = phi_inv.reshape(1, phi_inv.size)
+                            a_full = prob_full * phi_inv
+                            b_full = (1 - prob_full) * phi_inv
+                            phi_inv_red = 1/params_red["beta"][self.n_param_abd-(beta_mu.shape[1] - beta_mu_red.shape[1])-1] - 1
+                            phi_inv_red = phi_inv.reshape(1, phi_inv_red.size)
+                            a_red = prob_red * phi_inv_red
+                            b_red = (1 - prob_red) * phi_inv_red
+                            sample_counts = self.meth[(self.chr == chr_name) & 
+                                          (self.genomic_positions >= best_region['pos'].iloc[0]) &
+                                          (self.genomic_positions <= best_region['pos'].iloc[-1]), :].sum(axis=1)
+
+                            ll_full = dirichlet_multinomial.logpmf(self.meth[(self.chr == chr_name) & 
+                                                                 (self.genomic_positions >= best_region['pos'].iloc[0]) &
+                                                                 (self.genomic_positions <= best_region['pos'].iloc[-1]), :], 
+                                                                 a_full.T, sample_counts).sum()
+                            ll_red = dirichlet_multinomial.logpmf(self.meth[(self.chr == chr_name) & 
+                                                                 (self.genomic_positions >= best_region['pos'].iloc[0]) &
+                                                                 (self.genomic_positions <= best_region['pos'].iloc[-1]), :], 
+                                                                 a_red.T, sample_counts).sum()
+                            
+                            # LRT statistic
+                            D = -2 * (ll_red - ll_full)
+                            df = beta_mu.shape[1] - beta_mu_red.shape[1]
+                            pval = chi2.sf(D, df)
+                            significant_regions.append({
+                                'chr': chr_name,
+                                'start': best_region['pos'].iloc[0],
+                                'end': best_region['pos'].iloc[-1],
+                                'num_cpgs': num_cpgs,
+                                'num_sig_cpgs': best_num_sig,
+                                'prop_sig_cpgs': final_prop,
+                                'D': D,
+                                'df': df,
+                                'pval': pval,
+                            })
+                        else:
+                            # for general contrast C: impose Cβ=0 via reparameterization or penalty
+                            # simplest: use Lagrange multiplier / fit with constraint (not shown)
+                            raise NotImplementedError("LRT for general C not yet implemented")
                     else:
                         significant_regions.append({
                             'chr': chr_name,
@@ -1317,12 +1393,28 @@ class pyMethObj():
 
             significant_regions = pd.DataFrame(significant_regions)
             if 'pval' in significant_regions.columns:
-                significant_regions['fdr'] = multipletests(significant_regions['pval'], method='fdr_bh')[1]
+                significant_regions['fdr'] = multipletests(significant_regions['pval'], method=padjust_method)[1]
         return significant_regions
+    
+    @staticmethod
+    def dm_logpmf(k, alpha):
+        """
+        Dirichlet‑Multinomial log‑pmf for one sample:
+        k:    array of counts length m
+        alpha: array of concentrations length m
+        returns scalar log P(k | alpha)
+        """
+        n = k.sum()
+        a0 = alpha.sum()
+        # log Γ(n+1) - sum log Γ(k_i+1)
+        part1 = gammaln(n+1) - np.sum(gammaln(k+1))
+        # [Γ(a0) - Γ(n+a0)] + sum[Γ(k_i+α_i) - Γ(α_i)]
+        part2 = gammaln(a0) - gammaln(n + a0) \
+                + np.sum(gammaln(k + alpha) - gammaln(alpha))
+        return part1 + part2
 
     def find_significant_regions_HMM(self,
                                      cpg_res: pd.DataFrame, 
-                                     coef: str = None,
                                      n_states: int = 3, 
                                      min_cpgs: int = 5, 
                                      fdr_thresh: float = 0.05, 
@@ -1332,6 +1424,11 @@ class pyMethObj():
                                      hmm_plots: bool = False, 
                                      hmm_internals: bool = False,
                                      test_sig: bool = True, 
+                                     coef: str = None,
+                                     padjust_method: str = 'fdr_bh',
+                                     self_prob: float = 0.99,
+                                     bg_prob: float = 0.01,
+                                     other_prob: float = 0.0,
                                      ncpu: int = 1) -> pd.DataFrame:
         """
         Identify candidate DMR regions using an HMM with multiple states and multivariate features.
@@ -1362,6 +1459,16 @@ class pyMethObj():
             Whether to generate plots for HMM state decoding
         hmm_internals : bool, default False
             Whether to print internal HMM parameters
+        test_sig (bool): If True, perform a significance test on the region, using a mixed-effects model 
+            accounting for CpG covariance.
+        coef (str): Name of the coefficient to test, if test_sig is True. 
+        padjust_method (str): Method for adjusting p-values, if test_sig is True.
+        self_prob : float, default 0.99
+            Initial probability of staying in the same state
+        bg_prob : float, default 0.01
+            Initial probability of transitioning to the background state
+        other_prob : float, default 0.0
+            Initial probability of transitioning to other non-background states
         ncpu : int, default 4
             Number of CPU cores to use for parallel processing
             
@@ -1374,7 +1481,8 @@ class pyMethObj():
         candidate_regions = []
         cpg_res['-log10pval'] = -np.log10(cpg_res['pval'])
 
-        transmat_ = self.init_transmat(n_states) 
+        transmat_ = self.init_transmat(n_states, self_prob=self_prob, bg_prob=bg_prob, 
+                                       other_prob=other_prob) 
         means_ = self.init_means(n_states)
 
         # Initialize state labels if not provided
@@ -1410,7 +1518,7 @@ class pyMethObj():
             
             # Initialize a Gaussian HMM with three states and diagonal covariance
             model = hmm.GaussianHMM(n_components=n_states, covariance_type="diag", 
-                                n_iter=100, random_state=42, init_params="")
+                                    n_iter=100, random_state=42, init_params="")
             
             model.transmat_ = transmat_
             
@@ -1684,12 +1792,12 @@ class pyMethObj():
             region_res['prop_sig'] = region_res['num_sig'] / region_res['num_cpgs']
             region_res = region_res[region_res['prop_sig'] >= prop_sig_thresh]
             if test_sig:
-                region_res["fdr"] = multipletests(region_res["pval"], method='fdr_bh')[1]
+                region_res["fdr"] = multipletests(region_res["pval"], method=padjust_method)[1]
         
         return region_res
     
     @staticmethod
-    def init_transmat(n_states, self_prob=0.99):
+    def init_transmat(n_states, self_prob=0.99, bg_prob=0.01, other_prob=0.0):
         """
         Create an n_states × n_states transition matrix where
         - each row i has A[i,i] = self_prob
@@ -1699,12 +1807,15 @@ class pyMethObj():
         """
         if not (0 < self_prob < 1):
             raise ValueError("self_prob must be in (0,1)")
-        # off‑diagonal value
-        other = (1.0 - self_prob) / (n_states - 1)
+        if not (self_prob + bg_prob + (n_states-1)*other_prob == 1):
+            raise ValueError("self_prob + bg_prob + (n_states-1)*other_prob must equal 1")
         # start with all entries = other
-        A = np.full((n_states, n_states), other)                      
+        A = np.full((n_states, n_states), other_prob)                      
         # set diagonals
-        np.fill_diagonal(A, self_prob)                                     
+        np.fill_diagonal(A, self_prob)   
+        # set background transition probabilities
+        A[1:, 0] = bg_prob       
+        A[0, 1:] = (1-self_prob)/(n_states-1)                           
         return A
     
     @staticmethod
