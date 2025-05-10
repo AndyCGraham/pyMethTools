@@ -33,7 +33,7 @@ class FitCpG():
         else:
             self.sample_weights = np.ones(sum(~np.isnan(total)))
         self.total = total[~np.isnan(total)]
-        self.count = count[~np.isnan(total)]
+        self.count = count[~np.isnan(count)]
         self.Z = np.arcsin(2*((self.count + c0)/(self.total+2*c0))-1) # Transformed methylation proportions
         self.n_samples = self.total.shape[0]
         self.X = X[~np.isnan(total)]

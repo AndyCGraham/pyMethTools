@@ -3,6 +3,7 @@ README.md
 pyproject.toml
 requirements.txt
 pyMethTools/FitCpG.py
+pyMethTools/FitRegion.py
 pyMethTools/__init__.py
 pyMethTools/pyMethObj.py
 pyMethTools.egg-info/PKG-INFO

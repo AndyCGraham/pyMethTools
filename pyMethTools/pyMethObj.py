@@ -3,8 +3,9 @@ from numba import njit
 import pandas as pd
 from pandas.api.types import is_integer_dtype
 from scipy.optimize import minimize,Bounds
-from scipy.stats import betabinom,norm,chi2
+from scipy.stats import betabinom,norm,chi2,rankdata,dirichlet_multinomial
 from scipy.special import gammaln,binom,beta,logit,expit,digamma,polygamma
+from scipy.linalg import cho_factor, cho_solve
 from statsmodels.stats.multitest import multipletests
 from statsmodels.genmod.families.links import Link
 from itertools import chain
@@ -16,6 +17,7 @@ import random
 import copy
 from hmmlearn import hmm
 from pyMethTools.FitCpG import FitCpG
+from pyMethTools.FitRegion import FitRegion
 from typing import List, Dict, Tuple, Union, Optional, Callable, Any, TypeVar, Sequence, cast
 from typing import Set, Iterator, Generator, Type, Generic, Protocol, overload
 
@@ -898,7 +900,6 @@ class pyMethObj():
             coef_indices = np.where(np.in1d(self.param_names, coef))[0]
         elif contrast is not None:
             coef_indices = np.where(np.in1d(self.param_names, list(contrast.keys())))[0]
-
         reduced_X = np.delete(self.X, coef_indices, axis=1)
         params_red = np.vstack(self.fit_betabinom(X=reduced_X,return_params=True,ncpu=ncpu))
         beta_mu_red = params_red[:,:reduced_X.shape[1]]
@@ -935,13 +936,13 @@ class pyMethObj():
 
         if find_dmrs == 'binary_search':
             dmr_res = self.find_significant_regions(cpg_res,prop_sig=prop_sig,fdr_thresh=fdr_thresh,max_gap=max_gap,
-                                                    max_gap_cpgs=max_gap_cpgs)
+                                                    max_gap_cpgs=max_gap_cpgs, coef=coef_indices)
             return cpg_res, dmr_res
         
         elif find_dmrs == 'HMM':
             dmr_res = self.find_significant_regions_HMM(cpg_res, n_states=n_states, min_cpgs=min_cpgs, fdr_thresh=fdr_thresh, 
                                                         prop_sig_thresh=prop_sig, state_labels=state_labels, 
-                                                        hmm_plots=False, hmm_internals=False)
+                                                        hmm_plots=False, hmm_internals=False, coef=coef_indices)
             return cpg_res, dmr_res
         
         else:
@@ -1114,7 +1115,7 @@ class pyMethObj():
             
         if find_dmrs == 'binary_search':
             dmr_res = self.find_significant_regions(res,prop_sig=prop_sig,fdr_thresh=fdr_thresh,max_gap=max_gap,
-                                                    max_gap_cpgs=max_gap_cpgs)
+                                                    max_gap_cpgs=max_gap_cpgs,C=C)
             if (n_permute > 1) and (not dmr_res.empty):
                 permuted_dmrs = []
                 for perm in range(n_permute):
@@ -1150,32 +1151,35 @@ class pyMethObj():
         elif find_dmrs == 'HMM':
             dmr_res = self.find_significant_regions_HMM(res, n_states=n_states, min_cpgs=min_cpgs, fdr_thresh=fdr_thresh, 
                                                         prop_sig_thresh=prop_sig, state_labels=state_labels, 
-                                                        hmm_plots=False, hmm_internals=False)
+                                                        hmm_plots=False, hmm_internals=False, coef=idx)
             return res, dmr_res
 
         else:
             return res
 
-
-    @staticmethod
-    def find_significant_regions(df: pd.DataFrame,
+    def find_significant_regions(self,
+                                df: pd.DataFrame,
                                 prop_sig: float = 0.5,
                                 fdr_thresh: float = 0.1,
-                                maxthresh: float = 0.2,
-                                max_gap: int = 1000,
+                                maxthresh: float = 0.5,
+                                max_gap: int = 10000,
                                 min_cpgs: int = 3,
-                                max_gap_cpgs: int = 2) -> pd.DataFrame:
+                                max_gap_cpgs: int = 2,
+                                test_sig: bool = True,
+                                coef: str = None,
+                                C: np.array = None,
+                                padjust_method: str = 'fdr_bh') -> pd.DataFrame:
         """
         Find regions of adjacent CpGs where:
         - The gap between successive CpGs is less than max_gap.
         - The region is extended as far as possible until a gap violation, an FDR above maxthresh, 
-            or more than max_gap_cpgs adjacent non-significant CpGs would be introduced.
+        or more than max_gap_cpgs adjacent non-significant CpGs would be introduced.
         - The region must end on a significant CpG (FDR <= fdr_thresh).
         - Among candidate regions starting from a given significant CpG, the candidate with the greatest 
-            number of significant CpGs is chosen; ties are broken by selecting the one with the fewest 
-            non-significant CpGs.
+        number of significant CpGs is chosen; ties are broken by selecting the one with the fewest 
+        non-significant CpGs.
         - The region must contain at least min_cpgs CpGs.
-        
+
         Parameters:
             df (pd.DataFrame): DataFrame with columns 'chr', 'pos', and 'fdr'.
             max_gap (int): Maximum allowed gap between adjacent CpGs.
@@ -1184,125 +1188,195 @@ class pyMethObj():
             maxthresh (float): FDR threshold above which a region immediately ends.
             min_cpgs (int): Minimum number of CpGs required in a region.
             max_gap_cpgs (int): Maximum number of adjacent non-significant CpGs allowed in a region.
-        
+            test_sig (bool): If True, perform a significance test on the region, using a mixed-effects model 
+                accounting for CpG covariance.
+            coef (str): Name of the coefficient to test, if test_sig is True. 
+            C (np.array): Contrast matrix for the test, if test_sig is True.
+            padjust_method (str): Method for adjusting p-values, if test_sig is True.
+
         Returns:
             pd.DataFrame: DataFrame with columns 'chr', 'start', 'end', 'num_cpgs',
-                        'num_sig_cpgs', and 'prop_sig_cpgs' for each region.
+                        'num_sig_cpgs', and 'prop_sig_cpgs' for each region. Additionally,
+                        if test_sig is True, columns 'stat'/'D', 'df', 'pval', and 'fdr' are included.
         """
         significant_regions = []
-        
         # Sort the DataFrame by chromosome and position.
         df = df.sort_values(by=['chr', 'pos']).reset_index(drop=True)
-        
+
         # Process each chromosome separately.
         for chr_name, group in df.groupby('chr'):
-            # Reset index for 0-based indexing.
             chr_df = group.reset_index(drop=True)
             positions = chr_df['pos'].to_numpy()
             n = len(chr_df)
-            used_cpgs = set()  # to avoid overlaps
-            
+            used_cpgs = set()
             i = 0
+
             while i < n:
                 # Start only if the current CpG is significant and not already used.
                 if chr_df['fdr'].iloc[i] > fdr_thresh or i in used_cpgs:
                     i += 1
                     continue
-                
-                # Extend the region as far as possible from the starting point i.
+
+                # Extend the region as far as possible.
                 j_max = i
                 while j_max + 1 < n:
-                    # Check the gap constraint.
-                    if positions[j_max + 1] - positions[j_max] > max_gap:
+                    if positions[j_max+1] - positions[j_max] > max_gap:
                         break
-                    # End if the next CpG's FDR is above maxthresh.
-                    if chr_df['fdr'].iloc[j_max + 1] > maxthresh:
+                    if chr_df['fdr'].iloc[j_max+1] > maxthresh:
                         break
-                    
-                    # Check if including the next CpG would create a block of > max_gap_cpgs adjacent non-sig CpGs.
-                    candidate = chr_df['fdr'].iloc[i:j_max+2].to_numpy()  # region from i to j_max+1
-                    current_count = 0
-                    max_adj_non_sig = 0
-                    for val in candidate:
-                        if val > fdr_thresh:
-                            current_count += 1
-                            max_adj_non_sig = max(max_adj_non_sig, current_count)
-                        else:
-                            current_count = 0
-                    if max_adj_non_sig > max_gap_cpgs:
+                    block = chr_df['fdr'].iloc[i:j_max+2].to_numpy()
+                    curr = 0; mb = 0
+                    for v in block:
+                        curr = curr + 1 if v > fdr_thresh else 0
+                        mb = max(mb, curr)
+                    if mb > max_gap_cpgs:
                         break
-                    
                     j_max += 1
-                
-                # Now, consider all candidate endpoints from minimal region size (i + min_cpgs - 1) to j_max.
-                # For each candidate, the region must end on a significant CpG.
+
+                # Consider candidate endpoints.
                 candidate_regions = []
-                start_index = i
-                for candidate_end in range(max(start_index + min_cpgs - 1, start_index), j_max + 1):
-                    # Skip if the candidate endpoint is not a significant CpG.
-                    if chr_df['fdr'].iloc[candidate_end] > fdr_thresh:
+                for end in range(max(i + min_cpgs - 1, i), j_max+1):
+                    if chr_df['fdr'].iloc[end] > fdr_thresh:
                         continue
-                    
-                    subregion = chr_df.iloc[start_index:candidate_end + 1]
-                    num_cpgs = len(subregion)
-                    num_sig = (subregion['fdr'] <= fdr_thresh).sum()
-                    prop = num_sig / num_cpgs if num_cpgs > 0 else 0
-                    
-                    # Recompute maximum adjacent non-sig count in the candidate region.
-                    candidate_vals = subregion['fdr'].to_numpy()
-                    current_count = 0
-                    max_adj_non_sig = 0
-                    for val in candidate_vals:
-                        if val > fdr_thresh:
-                            current_count += 1
-                            max_adj_non_sig = max(max_adj_non_sig, current_count)
-                        else:
-                            current_count = 0
+                    sub = chr_df.iloc[i:end+1]
+                    num_cpgs = len(sub)
+                    num_sig = (sub['fdr'] <= fdr_thresh).sum()
+                    prop = num_sig / num_cpgs
+                    curr = 0; mb = 0
+                    for v in sub['fdr']:
+                        curr = curr + 1 if v > fdr_thresh else 0
+                        mb = max(mb, curr)
+                    if prop >= prop_sig and mb <= max_gap_cpgs:
+                        candidate_regions.append((end, num_sig, num_cpgs-num_sig, prop, sub))
 
-                    # Accept candidate only if it meets the overall proportion and does not violate the adjacent rule.
-                    if prop >= prop_sig and max_adj_non_sig <= max_gap_cpgs:
-                        non_sig_count = num_cpgs - num_sig
-                        # Record candidate as a tuple:
-                        # (endpoint index, number of sig CpGs, number of non-sig CpGs, proportion, candidate region DataFrame)
-                        candidate_regions.append((candidate_end, num_sig, non_sig_count, prop, subregion))
-                
-                # If any candidate region meets the criteria, select the one with the most significant CpGs.
-                # Ties are broken by selecting the candidate with fewer non-significant CpGs;
-                # a further tie-breaker is the candidate_end (lowest index).
-                if candidate_regions:
-                    candidate_regions.sort(key=lambda x: (-x[1], x[2], x[0]))
-                    best_candidate_end, best_num_sig, best_non_sig, best_prop, best_region = candidate_regions[0]
-                    num_cpgs = len(best_region)
-                    final_prop = best_num_sig / num_cpgs if num_cpgs > 0 else 0
-                    significant_regions.append({
-                        'chr': chr_name,
-                        'start': best_region['pos'].iloc[0],
-                        'end': best_region['pos'].iloc[-1],
-                        'num_cpgs': num_cpgs,
-                        'num_sig_cpgs': best_num_sig,
-                        'prop_sig_cpgs': final_prop
-                    })
-                    used_cpgs.update(range(i, best_candidate_end + 1))
-                    i = best_candidate_end + 1
-                else:
-                    # If no candidate region meets the criteria, advance beyond the extended region.
+                if not candidate_regions:
                     i = j_max + 1
+                    continue
 
-        return pd.DataFrame(significant_regions)
+                # Select best candidate.
+                candidate_regions.sort(key=lambda x: (-x[1], x[2], x[0]))
+                end, best_num_sig, _, final_prop, best_region = candidate_regions[0]
+                num_cpgs = len(best_region)
 
+                # Extract counts & coverage for the region.
+                count_vec = self.meth[(self.chr == chr_name) &
+                                    (self.genomic_positions >= best_region['pos'].iloc[0]) &
+                                    (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten()
+                total_vec = self.coverage[(self.chr == chr_name) &
+                                        (self.genomic_positions >= best_region['pos'].iloc[0]) &
+                                        (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten()
+                cpg_idx = np.tile(np.arange(num_cpgs), self.X.shape[0])
+                sample_idx = np.repeat(np.arange(self.X.shape[0]), num_cpgs)
 
+                if test_sig:
+                    # Full PQL mixed-effects fit
+                    full = FitRegion(
+                        X = np.repeat(self.X, num_cpgs, axis=0),
+                        count = count_vec, total = total_vec,
+                        cpg_idx = cpg_idx,
+                        sample_idx = sample_idx
+                    ).fit()
+                    beta_full, phi_full, Sigma_full = full['beta'], full['phi'], full['Sigma']
+
+                    # Wald test on coefficient or contrast
+                    if coef is not None:
+                        effect = np.array([(beta_full[coef]).sum()])
+                        var_eff = np.array([(full['se'][coef]**2).sum()])
+                    else:
+                        effect = (beta_full * C).sum(axis=1)
+                        var_eff = (full['se']**2 * C**2).sum(axis=1)
+                    stat = effect / np.sqrt(var_eff)
+                    pval = 2 * norm.sf(np.abs(stat))
+                    significant_regions.append({
+                        'chr': chr_name, 'start': best_region['pos'].iloc[0],
+                        'end': best_region['pos'].iloc[-1], 'num_cpgs': num_cpgs,
+                        'num_sig_cpgs': best_num_sig, 'prop_sig_cpgs': final_prop,
+                        'stat': stat[0], 'pval': pval[0]
+                    })
+                else:
+                    significant_regions.append({
+                        'chr': chr_name, 'start': best_region['pos'].iloc[0],
+                        'end': best_region['pos'].iloc[-1], 'num_cpgs': num_cpgs,
+                        'num_sig_cpgs': best_num_sig, 'prop_sig_cpgs': final_prop
+                    })
+
+                used_cpgs.update(range(i, end+1))
+                i = end + 1
+
+            sig_df = pd.DataFrame(significant_regions)
+            if 'pval' in sig_df:
+                sig_df['fdr'] = multipletests(sig_df['pval'], method=padjust_method)[1]
+        return sig_df
     
     @staticmethod
-    def find_significant_regions_HMM(cpg_res: pd.DataFrame, 
-                                    n_states: int = 3, 
-                                    min_cpgs: int = 5, 
-                                    fdr_thresh: float = 0.05, 
-                                    prop_sig_thresh: float = 0.5, 
-                                    max_gap: int = 5000, 
-                                    state_labels: Optional[Dict[int, str]] = None, 
-                                    hmm_plots: bool = False, 
-                                    hmm_internals: bool = False, 
-                                    ncpu: int = 4) -> pd.DataFrame:
+    def pql_loglik(count_vec: np.ndarray,
+                            total_vec: np.ndarray,
+                            beta: np.ndarray,
+                            phi: float,
+                            Sigma: np.ndarray,
+                            X_design: np.ndarray,
+                            cpg_idx: np.ndarray,
+                            sample_idx: np.ndarray) -> float:
+        """
+        Compute marginal PQL log-likelihood for arcsin-transformed beta-binomial LMM.
+        """
+        # working response
+        Zl = np.arcsin(2*(count_vec+0.1)/(total_vec+0.2) - 1)
+        # design
+        n_obs = Zl.size
+        Xmat = np.repeat(X_design, int(n_obs / X_design.shape[0]), axis=0)
+        # residual variances
+        Vd = total_vec / (1 + (total_vec - 1) * phi)
+        R = np.diag(Vd)
+        # random-effects design
+        J = X_design.shape[0]; m = int(n_obs / J)
+        Zr = np.zeros((n_obs, J*m))
+        for u in range(n_obs):
+            Zr[u, sample_idx[u]*m + cpg_idx[u]] = 1
+        # marginal V
+        V = Zr.dot(np.kron(np.eye(J), Sigma)).dot(Zr.T) + R
+        # residual
+        resid = Zl - Xmat.dot(beta)
+        # Cholesky
+        cf = cho_factor(V, lower=True)
+        logdet = 2 * np.sum(np.log(np.diag(cf[0])))
+        quad = resid.dot(cho_solve(cf, resid))
+        return -0.5 * (n_obs * np.log(2 * np.pi) + logdet + quad)
+    
+    @staticmethod
+    def dm_logpmf(k, alpha):
+        """
+        Dirichlet‑Multinomial log‑pmf for one sample:
+        k:    array of counts length m
+        alpha: array of concentrations length m
+        returns scalar log P(k | alpha)
+        """
+        n = k.sum()
+        a0 = alpha.sum()
+        # log Γ(n+1) - sum log Γ(k_i+1)
+        part1 = gammaln(n+1) - np.sum(gammaln(k+1))
+        # [Γ(a0) - Γ(n+a0)] + sum[Γ(k_i+α_i) - Γ(α_i)]
+        part2 = gammaln(a0) - gammaln(n + a0) \
+                + np.sum(gammaln(k + alpha) - gammaln(alpha))
+        return part1 + part2
+
+    def find_significant_regions_HMM(self,
+                                     cpg_res: pd.DataFrame, 
+                                     n_states: int = 3, 
+                                     min_cpgs: int = 5, 
+                                     fdr_thresh: float = 0.05, 
+                                     prop_sig_thresh: float = 0.5, 
+                                     max_gap: int = 5000, 
+                                     state_labels: Optional[Dict[int, str]] = None, 
+                                     hmm_plots: bool = False, 
+                                     hmm_internals: bool = False,
+                                     test_sig: bool = True, 
+                                     coef: str = None,
+                                     padjust_method: str = 'fdr_bh',
+                                     self_prob: float = 0.99,
+                                     bg_prob: float = 0.01,
+                                     other_prob: float = 0.0,
+                                     ncpu: int = 1) -> pd.DataFrame:
         """
         Identify candidate DMR regions using an HMM with multiple states and multivariate features.
         Utilizes Ray for parallel processing of chromosomes only, not segments.
@@ -1332,6 +1406,16 @@ class pyMethObj():
             Whether to generate plots for HMM state decoding
         hmm_internals : bool, default False
             Whether to print internal HMM parameters
+        test_sig (bool): If True, perform a significance test on the region, using a mixed-effects model 
+            accounting for CpG covariance.
+        coef (str): Name of the coefficient to test, if test_sig is True. 
+        padjust_method (str): Method for adjusting p-values, if test_sig is True.
+        self_prob : float, default 0.99
+            Initial probability of staying in the same state
+        bg_prob : float, default 0.01
+            Initial probability of transitioning to the background state
+        other_prob : float, default 0.0
+            Initial probability of transitioning to other non-background states
         ncpu : int, default 4
             Number of CPU cores to use for parallel processing
             
@@ -1340,11 +1424,29 @@ class pyMethObj():
         regions_df : pd.DataFrame
             Candidate regions with chromosome, position, and statistical information
         """
-        if state_labels is None:
-            state_labels = {0: 'Background', 1: 'Hypermethylated', 2: 'Hypomethylated'}
         
         candidate_regions = []
         cpg_res['-log10pval'] = -np.log10(cpg_res['pval'])
+
+        transmat_ = self.init_transmat(n_states, self_prob=self_prob, bg_prob=bg_prob, 
+                                       other_prob=other_prob) 
+        means_ = self.init_means(n_states)
+
+        # Initialize state labels if not provided
+        if state_labels is None:
+            state_ranks = np.zeros_like(means_[:,1], dtype=int)
+            state_ranks[means_[:,1] <  0] = rankdata(-np.abs(means_[:,1][means_[:,1] <  0]), method="dense") 
+            state_ranks[means_[:,1] > 0] = rankdata(-np.abs(means_[:,1][means_[:,1] > 0]), method="dense")
+            state_labels = {
+                i: (
+                    "background"
+                    if val == 0
+                    else f"hypermethylated_{state_ranks[i]}"
+                    if val  > 0
+                    else f"hypomethylated_{state_ranks[i]}"
+                )
+                for i, val in enumerate(means_[:,1])
+            }
         
         # Initialize Ray for parallel processing if not already initialized
         ray_initialized = ray.is_initialized()
@@ -1352,7 +1454,8 @@ class pyMethObj():
             ray.init(num_cpus=ncpu)
         
         @ray.remote
-        def process_chromosome(chrom_group, cpg_res_full):
+        def process_chromosome(chrom_group, cpg_res_full, transmat_, means_,
+                               hmm_internals=False, hmm_plots=False):
             """Process a single chromosome's CpGs to identify DMR regions"""
             group = chrom_group.sort_values('pos').reset_index(drop=True)
             chrom = group['chr'].iloc[0]
@@ -1362,20 +1465,12 @@ class pyMethObj():
             
             # Initialize a Gaussian HMM with three states and diagonal covariance
             model = hmm.GaussianHMM(n_components=n_states, covariance_type="diag", 
-                                n_iter=100, random_state=42, init_params="c")
+                                    n_iter=100, random_state=42, init_params="")
             
-            model.transmat_ = np.array([
-                [0.9999, 0.00005, 0.00005],  # From background
-                [0.005, 0.99, 0.005],        # From hyper
-                [0.005, 0.005, 0.99]         # From hypo
-            ])
+            model.transmat_ = transmat_
             
             # Initialize means
-            model.means_ = np.array([
-                [0, 0.0],     # State 0: Background 
-                [3.0, 3.0],   # State 1: Hypermethylated 
-                [3.0, -3.0]   # State 2: Hypomethylated
-            ])
+            model.means_ = means_ 
             
             # Initialize diagonal covariances
             model.covars_ = np.tile(np.array([1.0, 1.0]), (n_states, 1))
@@ -1430,15 +1525,40 @@ class pyMethObj():
                                 num_sig = (cpg_res_full.loc[(cpg_res_full.chr == chrom) &
                                                         (cpg_res_full.pos >= start_pos) &
                                                         (cpg_res_full.pos <= end_pos), 'fdr'] <= fdr_thresh).sum()
-                                
-                                local_regions.append({
-                                    'chr': chrom,
-                                    'start': start_pos,
-                                    'end': end_pos,
-                                    'num_cpgs': current_region['end_idx'] - current_region['start_idx'] + 1,
-                                    'num_sig': num_sig,
-                                    'state': state_labels[current_region['state']]
-                                })
+                                num_cpgs = current_region['end_idx'] - current_region['start_idx'] + 1
+
+                                if test_sig:
+                                    region_res = FitRegion(X = np.repeat(self.X, num_cpgs, axis=0), 
+                                                        count = self.meth[(self.chr == chrom) & 
+                                                                            (self.genomic_positions >= start_pos) &
+                                                                            (self.genomic_positions <= end_pos)].T.flatten(), 
+                                                        total = self.coverage[(self.chr == chrom) & 
+                                                                            (self.genomic_positions >= start_pos) &
+                                                                            (self.genomic_positions <= end_pos)].T.flatten(), 
+                                                        cpg_idx = np.tile(np.arange(num_cpgs), self.X.shape[0]), 
+                                                        sample_idx = np.repeat(np.arange(self.X.shape[0]), num_cpgs)).fit()
+                                    Z = region_res['beta'][coef] / region_res['se'][coef]
+                                    pval = 2  * norm.sf(np.abs(Z))
+                                    res = {
+                                        'chr': chrom,
+                                        'start': start_pos,
+                                        'end': end_pos,
+                                        'num_cpgs': num_cpgs,
+                                        'num_sig': num_sig,
+                                        'state': state_labels[current_region['state']],
+                                        "stat": Z[0],
+                                        "pval": pval[0],
+                                    } 
+                                else:
+                                    res = {
+                                        'chr': chrom,
+                                        'start': start_pos,
+                                        'end': end_pos,
+                                        'num_cpgs': num_cpgs,
+                                        'num_sig': num_sig,
+                                        'state': state_labels[current_region['state']]
+                                    }   
+                                local_regions.append(res)
                             # Start a new region
                             current_region = {
                                 'chr': chrom,
@@ -1459,14 +1579,42 @@ class pyMethObj():
                                                         (cpg_res_full.pos >= start_pos) &
                                                         (cpg_res_full.pos <= end_pos), 'fdr'] <= fdr_thresh).sum()
                                 
-                                local_regions.append({
-                                    'chr': chrom,
-                                    'start': start_pos,
-                                    'end': end_pos,
-                                    'num_cpgs': current_region['end_idx'] - current_region['start_idx'] + 1,
-                                    'num_sig': num_sig,
-                                    'state': state_labels[current_region['state']]
-                                })
+                                num_cpgs = current_region['end_idx'] - current_region['start_idx'] + 1
+
+                                if test_sig:
+                                    region_res = FitRegion(X = np.repeat(self.X, num_cpgs, axis=0), 
+                                                        count = self.meth[(self.chr == chrom) & 
+                                                                            (self.genomic_positions >= start_pos) &
+                                                                            (self.genomic_positions <= end_pos)].T.flatten(), 
+                                                        total = self.coverage[(self.chr == chrom) & 
+                                                                            (self.genomic_positions >= start_pos) &
+                                                                            (self.genomic_positions <= end_pos)].T.flatten(), 
+                                                        cpg_idx = np.tile(np.arange(num_cpgs), self.X.shape[0]), 
+                                                        sample_idx = np.repeat(np.arange(self.X.shape[0]), num_cpgs)).fit()
+                                    Z = region_res['beta'][coef] / region_res['se'][coef]
+                                    pval = 2  * norm.sf(np.abs(Z))
+                                    res = {
+                                        'chr': chrom,
+                                        'start': start_pos,
+                                        'end': end_pos,
+                                        'num_cpgs': num_cpgs,
+                                        'num_sig': num_sig,
+                                        'state': state_labels[current_region['state']],
+                                        "stat": Z[0],
+                                        "pval": pval[0],
+                                    } 
+                                else:
+                                    res = {
+                                        'chr': chrom,
+                                        'start': start_pos,
+                                        'end': end_pos,
+                                        'num_cpgs': num_cpgs,
+                                        'num_sig': num_sig,
+                                        'state': state_labels[current_region['state']]
+                                    }   
+                                local_regions.append(res)
+
+                            # Start a new region
                             current_region = {
                                 'chr': chrom,
                                 'start_idx': i,
@@ -1484,14 +1632,40 @@ class pyMethObj():
                                                     (cpg_res_full.pos >= start_pos) &
                                                     (cpg_res_full.pos <= end_pos), 'fdr'] <= fdr_thresh).sum()
                             
-                            local_regions.append({
-                                'chr': chrom,
-                                'start': start_pos,
-                                'end': end_pos,
-                                'num_cpgs': current_region['end_idx'] - current_region['start_idx'] + 1,
-                                'num_sig': num_sig,
-                                'state': state_labels[current_region['state']]
-                            })
+                            num_cpgs = current_region['end_idx'] - current_region['start_idx'] + 1
+
+                            if test_sig:
+                                region_res = FitRegion(X = np.repeat(self.X, num_cpgs, axis=0), 
+                                                    count = self.meth[(self.chr == chrom) & 
+                                                                        (self.genomic_positions >= start_pos) &
+                                                                        (self.genomic_positions <= end_pos)].T.flatten(), 
+                                                    total = self.coverage[(self.chr == chrom) & 
+                                                                        (self.genomic_positions >= start_pos) &
+                                                                        (self.genomic_positions <= end_pos)].T.flatten(), 
+                                                    cpg_idx = np.tile(np.arange(num_cpgs), self.X.shape[0]), 
+                                                    sample_idx = np.repeat(np.arange(self.X.shape[0]), num_cpgs)).fit()
+                                Z = region_res['beta'][coef] / region_res['se'][coef]
+                                pval = 2  * norm.sf(np.abs(Z))
+                                res = {
+                                    'chr': chrom,
+                                    'start': start_pos,
+                                    'end': end_pos,
+                                    'num_cpgs': num_cpgs,
+                                    'num_sig': num_sig,
+                                    'state': state_labels[current_region['state']],
+                                    "stat": Z[0],
+                                    "pval": pval[0],
+                                } 
+                            else:
+                                res = {
+                                    'chr': chrom,
+                                    'start': start_pos,
+                                    'end': end_pos,
+                                    'num_cpgs': num_cpgs,
+                                    'num_sig': num_sig,
+                                    'state': state_labels[current_region['state']]
+                                }   
+                            local_regions.append(res)
                         current_region = None
             
             # Check if a region remains at the end
@@ -1504,21 +1678,49 @@ class pyMethObj():
                                         (cpg_res_full.pos >= start_pos) &
                                         (cpg_res_full.pos <= end_pos), 'fdr'] <= fdr_thresh).sum()
                 
-                local_regions.append({
-                    'chr': chrom,
-                    'start': start_pos,
-                    'end': end_pos,
-                    'num_cpgs': current_region['end_idx'] - current_region['start_idx'] + 1,
-                    'num_sig': num_sig,
-                    'state': state_labels[current_region['state']]
-                })
+                num_cpgs = current_region['end_idx'] - current_region['start_idx'] + 1
+
+                if test_sig:
+                    region_res = FitRegion(X = np.repeat(self.X, num_cpgs, axis=0), 
+                                        count = self.meth[(self.chr == chrom) & 
+                                                            (self.genomic_positions >= start_pos) &
+                                                            (self.genomic_positions <= end_pos)].T.flatten(), 
+                                        total = self.coverage[(self.chr == chrom) & 
+                                                            (self.genomic_positions >= start_pos) &
+                                                            (self.genomic_positions <= end_pos)].T.flatten(), 
+                                        cpg_idx = np.tile(np.arange(num_cpgs), self.X.shape[0]), 
+                                        sample_idx = np.repeat(np.arange(self.X.shape[0]), num_cpgs)).fit()
+                    Z = region_res['beta'][coef] / region_res['se'][coef]
+                    pval = 2  * norm.sf(np.abs(Z))
+                    res = {
+                        'chr': chrom,
+                        'start': start_pos,
+                        'end': end_pos,
+                        'num_cpgs': num_cpgs,
+                        'num_sig': num_sig,
+                        'state': state_labels[current_region['state']],
+                        "stat": Z[0],
+                        "pval": pval[0],
+                    } 
+                else:
+                    res = {
+                        'chr': chrom,
+                        'start': start_pos,
+                        'end': end_pos,
+                        'num_cpgs': num_cpgs,
+                        'num_sig': num_sig,
+                        'state': state_labels[current_region['state']]
+                    }   
+                local_regions.append(res)
             
             return local_regions
         
         # Process each chromosome in parallel
         chrom_tasks = []
         for chrom, group in cpg_res.groupby('chr'):
-            chrom_tasks.append(process_chromosome.remote(group, cpg_res))
+            chrom_tasks.append(process_chromosome.remote(group, cpg_res, transmat_ = transmat_,
+                                                         means_=means_, hmm_internals=hmm_internals, 
+                                                         hmm_plots=hmm_plots))
         
         # Collect results
         chrom_results = ray.get(chrom_tasks)
@@ -1536,8 +1738,109 @@ class pyMethObj():
         if not region_res.empty:
             region_res['prop_sig'] = region_res['num_sig'] / region_res['num_cpgs']
             region_res = region_res[region_res['prop_sig'] >= prop_sig_thresh]
+            if test_sig:
+                region_res["fdr"] = multipletests(region_res["pval"], method=padjust_method)[1]
         
         return region_res
+    
+    @staticmethod
+    def init_transmat(n_states, self_prob=0.99, bg_prob=0.01, other_prob=0.0):
+        """
+        Create an n_states × n_states transition matrix where
+        - each row i has A[i,i] = self_prob
+        - off‑diagonals in row i each get (1 − self_prob)/(n_states − 1)
+        This ensures each row sums to 1 and the chain “lingers” in each state
+        with probability self_prob.
+        """
+        if not (0 < self_prob < 1):
+            raise ValueError("self_prob must be in (0,1)")
+        if not (self_prob + bg_prob + (n_states-1)*other_prob == 1):
+            raise ValueError("self_prob + bg_prob + (n_states-1)*other_prob must equal 1")
+        # start with all entries = other
+        A = np.full((n_states, n_states), other_prob)                      
+        # set diagonals
+        np.fill_diagonal(A, self_prob)   
+        # set background transition probabilities
+        A[1:, 0] = bg_prob       
+        A[0, 1:] = (1-self_prob)/(n_states-1)                           
+        return A
+    
+    @staticmethod
+    def init_means(n_states, radius=3.0, start_angle=0.0):
+        """
+        Initialize (n_states × 2) means so that:
+        - The first coordinate (x) is always ≥ 0.
+        - The second coordinate (y) is placed on a circle of radius R.
+        - Angles θ_i = start_angle + 2π·i/n_states.
+
+        We enforce x ≥ 0 by taking abs(cos θ).
+        """
+        # 1) base angles 0…2π (exclusive)
+        base = np.linspace(0, 2*np.pi, num=n_states-1, endpoint=False)           # :contentReference[oaicite:0]{index=0}
+        θ = base + start_angle                                                  # 
+
+        # 2) meth stat mean
+        y = np.cos(θ) * radius                                         
+
+        # 3) -log10 mean
+        x = np.abs(y)
+
+        return np.vstack([np.array([0,0]),np.column_stack([x, y])])
+    
+    def mixed_bb(self, c1=1e-3, max_iter=10):
+        # initial GLS to get β and φ
+        gls_res = self.gls(c1)
+        β = gls_res.x[:self.p]
+        φ = gls_res.x[-1]
+
+        # initialize random intercepts u_i = 0
+        u = np.zeros(self.m)
+
+        for iteration in range(max_iter):
+            # --- E-step: subtract current random intercepts from Z ---
+            Z_tilde = self.Z - u[self.cpg]
+
+            # --- M-step stage 1: re-fit β and φ on adjusted data ---
+            # exactly your existing two-stage WLS but with Z_tilde
+            # (you can refactor your gls() to accept an external Z)
+            self.Z = Z_tilde
+            res = self.gls(c1)
+            β_new, φ_new = res.x[:self.p], res.x[-1]
+
+            # --- M-step stage 2: re-estimate u_i for each CpG by BLUP formula ---
+            # for CpG i, observations j∈I_i:
+            #   u_i = ( Σ_j w_ij (Z_ij - X_ij β) ) / ( Σ_j w_ij + 1/τ )
+            # where τ = Var(u_i)/Var(residual) is variance ratio.
+            # Here Var(residual) ≈ φ_new, and we treat Var(u) as unknown → estimate as sample var of u.
+            resid = self.Z - self.X.dot(β_new)
+            w = self.total * (self.sample_weights if self.sample_weights is not None else 1.0)
+            # group by cpg
+            num = np.zeros(self.m)
+            den = np.zeros(self.m)
+            for idx in range(self.m):
+                mask = (self.cpg == idx)
+                num[idx] = np.sum(w[mask] * resid[mask])
+                den[idx] = np.sum(w[mask])
+            # estimate τ by method-of-moments
+            u_new = num / (den + 1e-8)
+            τ = np.var(u_new) / φ_new
+
+            # shrink u toward zero: BLUP
+            u = u_new * (den / (den + 1/τ))
+
+            # check convergence
+            if np.allclose(β, β_new) and abs(φ - φ_new) < 1e-6:
+                β, φ = β_new, φ_new
+                break
+            β, φ = β_new, φ_new
+
+        # return fixed effects, dispersion, and random intercepts
+        out = OptimizeResult()
+        out.beta    = β
+        out.phi     = φ
+        out.u       = u
+        out.success = True
+        return out
 
     def permute_and_refit(self, 
                          coef: Optional[Union[str, List[str]]] = None, 
