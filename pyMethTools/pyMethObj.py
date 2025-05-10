@@ -5,6 +5,7 @@ from pandas.api.types import is_integer_dtype
 from scipy.optimize import minimize,Bounds
 from scipy.stats import betabinom,norm,chi2,rankdata,dirichlet_multinomial
 from scipy.special import gammaln,binom,beta,logit,expit,digamma,polygamma
+from scipy.linalg import cho_factor, cho_solve
 from statsmodels.stats.multitest import multipletests
 from statsmodels.genmod.families.links import Link
 from itertools import chain
@@ -935,7 +936,7 @@ class pyMethObj():
 
         if find_dmrs == 'binary_search':
             dmr_res = self.find_significant_regions(cpg_res,prop_sig=prop_sig,fdr_thresh=fdr_thresh,max_gap=max_gap,
-                                                    max_gap_cpgs=max_gap_cpgs, coef=coef_indices, test_use="lrt")
+                                                    max_gap_cpgs=max_gap_cpgs, coef=coef_indices)
             return cpg_res, dmr_res
         
         elif find_dmrs == 'HMM':
@@ -1157,29 +1158,28 @@ class pyMethObj():
             return res
 
     def find_significant_regions(self,
-                                 df: pd.DataFrame,
-                                 prop_sig: float = 0.5,
-                                 fdr_thresh: float = 0.1,
-                                 maxthresh: float = 0.5,
-                                 max_gap: int = 10000,
-                                 min_cpgs: int = 3,
-                                 max_gap_cpgs: int = 2,
-                                 test_sig: bool = True,
-                                 coef: str = None,
-                                 C: np.array = None,
-                                 padjust_method: str = 'fdr_bh',
-                                 test_use: str = "wald") -> pd.DataFrame:
+                                df: pd.DataFrame,
+                                prop_sig: float = 0.5,
+                                fdr_thresh: float = 0.1,
+                                maxthresh: float = 0.5,
+                                max_gap: int = 10000,
+                                min_cpgs: int = 3,
+                                max_gap_cpgs: int = 2,
+                                test_sig: bool = True,
+                                coef: str = None,
+                                C: np.array = None,
+                                padjust_method: str = 'fdr_bh') -> pd.DataFrame:
         """
         Find regions of adjacent CpGs where:
         - The gap between successive CpGs is less than max_gap.
         - The region is extended as far as possible until a gap violation, an FDR above maxthresh, 
-            or more than max_gap_cpgs adjacent non-significant CpGs would be introduced.
+        or more than max_gap_cpgs adjacent non-significant CpGs would be introduced.
         - The region must end on a significant CpG (FDR <= fdr_thresh).
         - Among candidate regions starting from a given significant CpG, the candidate with the greatest 
-            number of significant CpGs is chosen; ties are broken by selecting the one with the fewest 
-            non-significant CpGs.
+        number of significant CpGs is chosen; ties are broken by selecting the one with the fewest 
+        non-significant CpGs.
         - The region must contain at least min_cpgs CpGs.
-        
+
         Parameters:
             df (pd.DataFrame): DataFrame with columns 'chr', 'pos', and 'fdr'.
             max_gap (int): Maximum allowed gap between adjacent CpGs.
@@ -1191,210 +1191,157 @@ class pyMethObj():
             test_sig (bool): If True, perform a significance test on the region, using a mixed-effects model 
                 accounting for CpG covariance.
             coef (str): Name of the coefficient to test, if test_sig is True. 
-            C (str): Contrast matrix for the test, if test_sig is True.
+            C (np.array): Contrast matrix for the test, if test_sig is True.
             padjust_method (str): Method for adjusting p-values, if test_sig is True.
-            test_use (str): Method for testing significance, if test_sig is True.
-        
+
         Returns:
             pd.DataFrame: DataFrame with columns 'chr', 'start', 'end', 'num_cpgs',
                         'num_sig_cpgs', and 'prop_sig_cpgs' for each region. Additionally,
-                        if test_sig is True, columns 'Z', 'pval', and 'fdr' are included.
+                        if test_sig is True, columns 'stat'/'D', 'df', 'pval', and 'fdr' are included.
         """
         significant_regions = []
-        
         # Sort the DataFrame by chromosome and position.
         df = df.sort_values(by=['chr', 'pos']).reset_index(drop=True)
-        
+
         # Process each chromosome separately.
         for chr_name, group in df.groupby('chr'):
-            # Reset index for 0-based indexing.
             chr_df = group.reset_index(drop=True)
             positions = chr_df['pos'].to_numpy()
             n = len(chr_df)
-            used_cpgs = set()  # to avoid overlaps
-            
+            used_cpgs = set()
             i = 0
+
             while i < n:
                 # Start only if the current CpG is significant and not already used.
                 if chr_df['fdr'].iloc[i] > fdr_thresh or i in used_cpgs:
                     i += 1
                     continue
-                
-                # Extend the region as far as possible from the starting point i, in both directions.
+
+                # Extend the region as far as possible.
                 j_max = i
                 while j_max + 1 < n:
-                    # Check the gap constraint.
-                    if positions[j_max + 1] - positions[j_max] > max_gap:
+                    if positions[j_max+1] - positions[j_max] > max_gap:
                         break
-                    # End if the next CpG's FDR is above maxthresh.
-                    if chr_df['fdr'].iloc[j_max + 1] > maxthresh:
+                    if chr_df['fdr'].iloc[j_max+1] > maxthresh:
                         break
-                    
-                    # Check if including the next CpG would create a block of > max_gap_cpgs adjacent non-sig CpGs.
-                    candidate = chr_df['fdr'].iloc[i:j_max+2].to_numpy()  # region from i to j_max+1
-                    current_count = 0
-                    max_adj_non_sig = 0
-                    for val in candidate:
-                        if val > fdr_thresh:
-                            current_count += 1
-                            max_adj_non_sig = max(max_adj_non_sig, current_count)
-                        else:
-                            current_count = 0
-                    if max_adj_non_sig > max_gap_cpgs:
+                    block = chr_df['fdr'].iloc[i:j_max+2].to_numpy()
+                    curr = 0; mb = 0
+                    for v in block:
+                        curr = curr + 1 if v > fdr_thresh else 0
+                        mb = max(mb, curr)
+                    if mb > max_gap_cpgs:
                         break
-                    
                     j_max += 1
-                
-                # Now, consider all candidate endpoints from minimal region size (i + min_cpgs - 1) to j_max.
-                # For each candidate, the region must end on a significant CpG.
+
+                # Consider candidate endpoints.
                 candidate_regions = []
-                start_index = i
-                for candidate_end in range(max(start_index + min_cpgs - 1, start_index), j_max + 1):
-                    # Skip if the candidate endpoint is not a significant CpG.
-                    if chr_df['fdr'].iloc[candidate_end] > fdr_thresh:
+                for end in range(max(i + min_cpgs - 1, i), j_max+1):
+                    if chr_df['fdr'].iloc[end] > fdr_thresh:
                         continue
-                    
-                    subregion = chr_df.iloc[start_index:candidate_end + 1]
-                    num_cpgs = len(subregion)
-                    num_sig = (subregion['fdr'] <= fdr_thresh).sum()
-                    prop = num_sig / num_cpgs if num_cpgs > 0 else 0
-                    
-                    # Recompute maximum adjacent non-sig count in the candidate region.
-                    candidate_vals = subregion['fdr'].to_numpy()
-                    current_count = 0
-                    max_adj_non_sig = 0
-                    for val in candidate_vals:
-                        if val > fdr_thresh:
-                            current_count += 1
-                            max_adj_non_sig = max(max_adj_non_sig, current_count)
-                        else:
-                            current_count = 0
+                    sub = chr_df.iloc[i:end+1]
+                    num_cpgs = len(sub)
+                    num_sig = (sub['fdr'] <= fdr_thresh).sum()
+                    prop = num_sig / num_cpgs
+                    curr = 0; mb = 0
+                    for v in sub['fdr']:
+                        curr = curr + 1 if v > fdr_thresh else 0
+                        mb = max(mb, curr)
+                    if prop >= prop_sig and mb <= max_gap_cpgs:
+                        candidate_regions.append((end, num_sig, num_cpgs-num_sig, prop, sub))
 
-                    # Accept candidate only if it meets the overall proportion and does not violate the adjacent rule.
-                    if prop >= prop_sig and max_adj_non_sig <= max_gap_cpgs:
-                        non_sig_count = num_cpgs - num_sig
-                        # Record candidate as a tuple:
-                        # (endpoint index, number of sig CpGs, number of non-sig CpGs, proportion, candidate region DataFrame)
-                        candidate_regions.append((candidate_end, num_sig, non_sig_count, prop, subregion))
-                
-                # If any candidate region meets the criteria, select the one with the most significant CpGs.
-                # Ties are broken by selecting the candidate with fewer non-significant CpGs;
-                # a further tie-breaker is the candidate_end (lowest index).
-                if candidate_regions:
-                    candidate_regions.sort(key=lambda x: (-x[1], x[2], x[0]))
-                    best_candidate_end, best_num_sig, best_non_sig, best_prop, best_region = candidate_regions[0]
-                    num_cpgs = len(best_region)
-                    final_prop = best_num_sig / num_cpgs if num_cpgs > 0 else 0
-                    if test_sig:
-                        X = np.repeat(self.X, num_cpgs, axis=0)
-                        region_res = FitRegion(X = X, 
-                                               count = self.meth[(self.chr == chr_name) & 
-                                                                 (self.genomic_positions >= best_region['pos'].iloc[0]) &
-                                                                 (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten(), 
-                                               total = self.coverage[(self.chr == chr_name) & 
-                                                                 (self.genomic_positions >= best_region['pos'].iloc[0]) &
-                                                                 (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten(), 
-                                               cpg_idx = np.tile(np.arange(num_cpgs), self.X.shape[0]), 
-                                               sample_idx = np.repeat(np.arange(self.X.shape[0]), num_cpgs)).fit()
-                        if test_use == "wald":
-                            if coef is not None:
-                                effect = np.array([(region_res['beta'][coef]).sum()])
-                                var_effect = np.array([(region_res['se'][coef]**2).sum()])
-                            elif C is not None:
-                                effect = (region_res['beta'] * C).sum(axis=1)
-                                var_effect = (region_res['se']**2 * C**2).sum(axis=1)
-                            stat = effect / np.sqrt(var_effect)
-                            pval = 2 * norm.sf(np.abs(stat))
-                            fdr = multipletests(pval, method=padjust_method)[1]
-
-                            significant_regions.append({
-                                'chr': chr_name,
-                                'start': best_region['pos'].iloc[0],
-                                'end': best_region['pos'].iloc[-1],
-                                'num_cpgs': num_cpgs,
-                                'num_sig_cpgs': best_num_sig,
-                                'prop_sig_cpgs': final_prop,
-                                'stat': stat[0],
-                                'pval': pval[0],
-                            })
-                        elif test_use == "lrt":
-                            X_red = np.delete(self.X, coef, axis=1) # drop column `coef` from design
-                            params_red = FitRegion(X = np.repeat(X_red, num_cpgs, axis=0), 
-                                               count = self.meth[(self.chr == chr_name) & 
-                                                                 (self.genomic_positions >= best_region['pos'].iloc[0]) &
-                                                                 (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten(), 
-                                               total = self.coverage[(self.chr == chr_name) & 
-                                                                 (self.genomic_positions >= best_region['pos'].iloc[0]) &
-                                                                 (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten(), 
-                                               cpg_idx = np.tile(np.arange(num_cpgs), self.X.shape[0]), 
-                                               sample_idx = np.repeat(np.arange(self.X.shape[0]), num_cpgs)).fit()
-                            beta_mu = np.tile(region_res['beta'], (num_cpgs, 1))
-                            mu_wlink = self.X @ beta_mu.T
-                            prob_full = ((np.sin(mu_wlink) + 1) / 2) 
-                            beta_mu_red = np.tile(params_red["beta"], (num_cpgs, 1))
-                            mu_wlink_red = X_red @ beta_mu_red.T
-                            prob_red = ((np.sin(mu_wlink_red) + 1) / 2) 
-
-                            # Method-of-moments to alpha, beta: total = 1/phi - 1
-                            phi_inv = (1/region_res['phi']) - 1
-                            phi_inv = phi_inv.reshape(1, phi_inv.size)
-                            a_full = prob_full * phi_inv
-                            b_full = (1 - prob_full) * phi_inv
-                            phi_inv_red = 1/params_red["beta"][self.n_param_abd-(beta_mu.shape[1] - beta_mu_red.shape[1])-1] - 1
-                            phi_inv_red = phi_inv.reshape(1, phi_inv_red.size)
-                            a_red = prob_red * phi_inv_red
-                            b_red = (1 - prob_red) * phi_inv_red
-                            sample_counts = self.meth[(self.chr == chr_name) & 
-                                          (self.genomic_positions >= best_region['pos'].iloc[0]) &
-                                          (self.genomic_positions <= best_region['pos'].iloc[-1]), :].sum(axis=1)
-
-                            ll_full = dirichlet_multinomial.logpmf(self.meth[(self.chr == chr_name) & 
-                                                                 (self.genomic_positions >= best_region['pos'].iloc[0]) &
-                                                                 (self.genomic_positions <= best_region['pos'].iloc[-1]), :], 
-                                                                 a_full.T, sample_counts).sum()
-                            ll_red = dirichlet_multinomial.logpmf(self.meth[(self.chr == chr_name) & 
-                                                                 (self.genomic_positions >= best_region['pos'].iloc[0]) &
-                                                                 (self.genomic_positions <= best_region['pos'].iloc[-1]), :], 
-                                                                 a_red.T, sample_counts).sum()
-                            
-                            # LRT statistic
-                            D = -2 * (ll_red - ll_full)
-                            df = beta_mu.shape[1] - beta_mu_red.shape[1]
-                            pval = chi2.sf(D, df)
-                            significant_regions.append({
-                                'chr': chr_name,
-                                'start': best_region['pos'].iloc[0],
-                                'end': best_region['pos'].iloc[-1],
-                                'num_cpgs': num_cpgs,
-                                'num_sig_cpgs': best_num_sig,
-                                'prop_sig_cpgs': final_prop,
-                                'D': D,
-                                'df': df,
-                                'pval': pval,
-                            })
-                        else:
-                            # for general contrast C: impose Cβ=0 via reparameterization or penalty
-                            # simplest: use Lagrange multiplier / fit with constraint (not shown)
-                            raise NotImplementedError("LRT for general C not yet implemented")
-                    else:
-                        significant_regions.append({
-                            'chr': chr_name,
-                            'start': best_region['pos'].iloc[0],
-                            'end': best_region['pos'].iloc[-1],
-                            'num_cpgs': num_cpgs,
-                            'num_sig_cpgs': best_num_sig,
-                            'prop_sig_cpgs': final_prop
-                        })
-                    used_cpgs.update(range(i, best_candidate_end + 1))
-                    i = best_candidate_end + 1
-                else:
-                    # If no candidate region meets the criteria, advance beyond the extended region.
+                if not candidate_regions:
                     i = j_max + 1
+                    continue
 
-            significant_regions = pd.DataFrame(significant_regions)
-            if 'pval' in significant_regions.columns:
-                significant_regions['fdr'] = multipletests(significant_regions['pval'], method=padjust_method)[1]
-        return significant_regions
+                # Select best candidate.
+                candidate_regions.sort(key=lambda x: (-x[1], x[2], x[0]))
+                end, best_num_sig, _, final_prop, best_region = candidate_regions[0]
+                num_cpgs = len(best_region)
+
+                # Extract counts & coverage for the region.
+                count_vec = self.meth[(self.chr == chr_name) &
+                                    (self.genomic_positions >= best_region['pos'].iloc[0]) &
+                                    (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten()
+                total_vec = self.coverage[(self.chr == chr_name) &
+                                        (self.genomic_positions >= best_region['pos'].iloc[0]) &
+                                        (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten()
+                cpg_idx = np.tile(np.arange(num_cpgs), self.X.shape[0])
+                sample_idx = np.repeat(np.arange(self.X.shape[0]), num_cpgs)
+
+                if test_sig:
+                    # Full PQL mixed-effects fit
+                    full = FitRegion(
+                        X = np.repeat(self.X, num_cpgs, axis=0),
+                        count = count_vec, total = total_vec,
+                        cpg_idx = cpg_idx,
+                        sample_idx = sample_idx
+                    ).fit()
+                    beta_full, phi_full, Sigma_full = full['beta'], full['phi'], full['Sigma']
+
+                    # Wald test on coefficient or contrast
+                    if coef is not None:
+                        effect = np.array([(beta_full[coef]).sum()])
+                        var_eff = np.array([(full['se'][coef]**2).sum()])
+                    else:
+                        effect = (beta_full * C).sum(axis=1)
+                        var_eff = (full['se']**2 * C**2).sum(axis=1)
+                    stat = effect / np.sqrt(var_eff)
+                    pval = 2 * norm.sf(np.abs(stat))
+                    significant_regions.append({
+                        'chr': chr_name, 'start': best_region['pos'].iloc[0],
+                        'end': best_region['pos'].iloc[-1], 'num_cpgs': num_cpgs,
+                        'num_sig_cpgs': best_num_sig, 'prop_sig_cpgs': final_prop,
+                        'stat': stat[0], 'pval': pval[0]
+                    })
+                else:
+                    significant_regions.append({
+                        'chr': chr_name, 'start': best_region['pos'].iloc[0],
+                        'end': best_region['pos'].iloc[-1], 'num_cpgs': num_cpgs,
+                        'num_sig_cpgs': best_num_sig, 'prop_sig_cpgs': final_prop
+                    })
+
+                used_cpgs.update(range(i, end+1))
+                i = end + 1
+
+            sig_df = pd.DataFrame(significant_regions)
+            if 'pval' in sig_df:
+                sig_df['fdr'] = multipletests(sig_df['pval'], method=padjust_method)[1]
+        return sig_df
+    
+    @staticmethod
+    def pql_loglik(count_vec: np.ndarray,
+                            total_vec: np.ndarray,
+                            beta: np.ndarray,
+                            phi: float,
+                            Sigma: np.ndarray,
+                            X_design: np.ndarray,
+                            cpg_idx: np.ndarray,
+                            sample_idx: np.ndarray) -> float:
+        """
+        Compute marginal PQL log-likelihood for arcsin-transformed beta-binomial LMM.
+        """
+        # working response
+        Zl = np.arcsin(2*(count_vec+0.1)/(total_vec+0.2) - 1)
+        # design
+        n_obs = Zl.size
+        Xmat = np.repeat(X_design, int(n_obs / X_design.shape[0]), axis=0)
+        # residual variances
+        Vd = total_vec / (1 + (total_vec - 1) * phi)
+        R = np.diag(Vd)
+        # random-effects design
+        J = X_design.shape[0]; m = int(n_obs / J)
+        Zr = np.zeros((n_obs, J*m))
+        for u in range(n_obs):
+            Zr[u, sample_idx[u]*m + cpg_idx[u]] = 1
+        # marginal V
+        V = Zr.dot(np.kron(np.eye(J), Sigma)).dot(Zr.T) + R
+        # residual
+        resid = Zl - Xmat.dot(beta)
+        # Cholesky
+        cf = cho_factor(V, lower=True)
+        logdet = 2 * np.sum(np.log(np.diag(cf[0])))
+        quad = resid.dot(cho_solve(cf, resid))
+        return -0.5 * (n_obs * np.log(2 * np.pi) + logdet + quad)
     
     @staticmethod
     def dm_logpmf(k, alpha):
