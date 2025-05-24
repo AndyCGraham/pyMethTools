@@ -846,6 +846,7 @@ class pyMethObj():
             min_cpgs: int=3,
             n_states: int=3,
             state_labels: Optional[Dict[int, str]]=None,
+            chunksize: int=1000,
             ncpu: int=1) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.DataFrame]]:
         """
         Compute LRT for beta-binomial regression fits via scipy.stats.betabinom.logpmf.
@@ -881,6 +882,8 @@ class pyMethObj():
             Number of states for the Hidden Markov Model (if `find_dmrs='HMM'`).
         state_labels : list of str, optional
             Labels for the states in the Hidden Markov Model.
+        chunksize : int, default 1000
+            Number of regions to proccess per chunk, if ncp > 1.
         ncpu : int, default 1
             Number of CPUs to use for parallel computation.
 
@@ -901,7 +904,7 @@ class pyMethObj():
         elif contrast is not None:
             coef_indices = np.where(np.in1d(self.param_names, list(contrast.keys())))[0]
         reduced_X = np.delete(self.X, coef_indices, axis=1)
-        params_red = np.vstack(self.fit_betabinom(X=reduced_X,return_params=True,ncpu=ncpu))
+        params_red = np.vstack(self.fit_betabinom(X=reduced_X,return_params=True,chunksize=chunksize,ncpu=ncpu))
         beta_mu_red = params_red[:,:reduced_X.shape[1]]
         mu_wlink_red = reduced_X @ beta_mu_red.T
         prob_red = ((np.sin(mu_wlink_red) + 1) / 2) 
