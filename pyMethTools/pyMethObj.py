@@ -972,6 +972,7 @@ class pyMethObj():
         padjust_method: str='fdr_bh',
         n_permute: int=0,
         find_dmrs: str='binary_search',
+        test_dmr_sig: bool=True,
         prop_sig: float=0.5,
         fdr_thresh: float=0.1,
         max_gap: int=10000,
@@ -1003,6 +1004,9 @@ class pyMethObj():
             - 'binary_search': Use binary search to find significant regions.
             - 'HMM': Use a Hidden Markov Model to identify regions.
             - None: Do not identify DMRs.
+        test_dmr_sig : bool, default True
+            Whether to test the statistical signficance of found dmrs using a mixed-effects beta-binomial 
+            regression.
         prop_sig : float, default 0.5
             Proportion of significant CpGs required to define a DMR.
         fdr_thresh : float, default 0.1
@@ -1132,7 +1136,7 @@ class pyMethObj():
             
         if find_dmrs == 'binary_search':
             dmr_res = self.find_significant_regions(res,prop_sig=prop_sig,fdr_thresh=fdr_thresh,max_gap=max_gap,
-                                                    max_gap_cpgs=max_gap_cpgs,C=C)
+                                                    max_gap_cpgs=max_gap_cpgs,C=C,test_sig=test_dmr_sig,ncpu=ncpu)
             if (n_permute > 1) and (not dmr_res.empty):
                 permuted_dmrs = []
                 for perm in range(n_permute):
@@ -1152,8 +1156,9 @@ class pyMethObj():
                                         })
                     permuted_dmrs.append(self.find_significant_regions(perm_res,prop_sig=prop_sig,
                                                                        fdr_thresh=fdr_thresh,max_gap=max_gap,
-                                                                       min_cpgs=min_cpgs,
-                                                                       max_gap_cpgs=max_gap_cpgs))
+                                                                       min_cpgs=min_cpgs, 
+                                                                       max_gap_cpgs=max_gap_cpgs,
+                                                                       test_sig=test_dmr_sig,ncpu=ncpu))
 
                 # Concatenate the permuted DMRs, if none found add one with 0 cpgs
                 permuted_prop_sig_cpgs = [perm.prop_sig_cpgs.values if not perm.empty else np.array([0]) for perm in permuted_dmrs]
@@ -1168,7 +1173,7 @@ class pyMethObj():
         elif find_dmrs == 'HMM':
             dmr_res = self.find_significant_regions_HMM(res, n_states=n_states, min_cpgs=min_cpgs, fdr_thresh=fdr_thresh, 
                                                         prop_sig_thresh=prop_sig, state_labels=state_labels, 
-                                                        hmm_plots=False, hmm_internals=False, coef=idx)
+                                                        hmm_plots=False, hmm_internals=False, coef=idx, ncpu=ncpu)
             return res, dmr_res
 
         else:
@@ -1185,7 +1190,8 @@ class pyMethObj():
                                 test_sig: bool = True,
                                 coef: str = None,
                                 C: np.array = None,
-                                padjust_method: str = 'fdr_bh') -> pd.DataFrame:
+                                padjust_method: str = 'fdr_bh',
+                                ncpu: int = 1) -> pd.DataFrame:
         """
         Find regions of adjacent CpGs where:
         - The gap between successive CpGs is less than max_gap.
@@ -1210,6 +1216,7 @@ class pyMethObj():
             coef (str): Name of the coefficient to test, if test_sig is True. 
             C (np.array): Contrast matrix for the test, if test_sig is True.
             padjust_method (str): Method for adjusting p-values, if test_sig is True.
+            ncpu (int, default = 1): Number of CPUs to use for parallel computation.
 
         Returns:
             pd.DataFrame: DataFrame with columns 'chr', 'start', 'end', 'num_cpgs',
@@ -1275,107 +1282,140 @@ class pyMethObj():
                 end, best_num_sig, _, final_prop, best_region = candidate_regions[0]
                 num_cpgs = len(best_region)
 
-                if test_sig:
-                    # Extract counts & coverage for the region.
-                    count_vec = self.meth[(self.chr == chr_name) &
-                                        (self.genomic_positions >= best_region['pos'].iloc[0]) &
-                                        (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten()
-                    total_vec = self.coverage[(self.chr == chr_name) &
-                                            (self.genomic_positions >= best_region['pos'].iloc[0]) &
-                                            (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten()
-                    cpg_idx = np.tile(np.arange(num_cpgs), self.X.shape[0])
-                    sample_idx = np.repeat(np.arange(self.X.shape[0]), num_cpgs)
-
-                    # Full PQL mixed-effects fit
-                    full = FitRegion(
-                        X = np.repeat(self.X, num_cpgs, axis=0),
-                        count = count_vec, total = total_vec,
-                        cpg_idx = cpg_idx,
-                        sample_idx = sample_idx
-                    ).fit()
-                    beta_full, phi_full, Sigma_full = full['beta'], full['phi'], full['Sigma']
-
-                    # Wald test on coefficient or contrast
-                    if coef is not None:
-                        effect = np.array([(beta_full[coef]).sum()])
-                        var_eff = np.array([(full['se'][coef]**2).sum()])
-                    else:
-                        effect = (beta_full * C).sum(axis=1)
-                        var_eff = (full['se']**2 * C**2).sum(axis=1)
-                    stat = effect / np.sqrt(var_eff)
-                    pval = 2 * norm.sf(np.abs(stat))
-                    significant_regions.append({
-                        'chr': chr_name, 'start': best_region['pos'].iloc[0],
-                        'end': best_region['pos'].iloc[-1], 'num_cpgs': num_cpgs,
-                        'num_sig_cpgs': best_num_sig, 'prop_sig_cpgs': final_prop,
-                        'stat': stat[0], 'pval': pval[0]
-                    })
-                else:
-                    significant_regions.append({
+                significant_regions.append({
                         'chr': chr_name, 'start': best_region['pos'].iloc[0],
                         'end': best_region['pos'].iloc[-1], 'num_cpgs': num_cpgs,
                         'num_sig_cpgs': best_num_sig, 'prop_sig_cpgs': final_prop
                     })
-
+                
                 used_cpgs.update(range(i, end+1))
                 i = end + 1
 
-            sig_df = pd.DataFrame(significant_regions)
-            if 'pval' in sig_df:
-                sig_df['fdr'] = multipletests(sig_df['pval'], method=padjust_method)[1]
+        sig_df = pd.DataFrame(significant_regions)
+
+        if test_sig:
+            # Test the significance of each region using a mixed-effects model.
+
+            if ncpu > 1:
+                ray.init(num_cpus=ncpu)
+                (
+                    stat,
+                    pval
+                ) = zip(*ray.get([
+                    self.test_region.remote(
+                    self.meth[
+                        (self.chr == chr_name)
+                        & (self.genomic_positions >= sig_df["start"].iloc[region])
+                        & (self.genomic_positions <= sig_df["end"].iloc[region])
+                    ]
+                    .T
+                    .flatten(),
+                    self.coverage[
+                        (self.chr == chr_name)
+                        & (self.genomic_positions >= sig_df["start"].iloc[region])
+                        & (self.genomic_positions <= sig_df["end"].iloc[region])
+                    ]
+                    .T
+                    .flatten(),
+                    sig_df["num_cpgs"].iloc[region],
+                    self.X, coef=coef,C=C
+                ) for region in range(sig_df.shape[0]) ]))
+                
+
+            else:
+                (
+                    stat,
+                    pval,
+                ) = zip(*[
+                    self.test_region_local(
+                    self.meth[
+                        (self.chr == chr_name)
+                        & (self.genomic_positions >= sig_df["start"].iloc[region])
+                        & (self.genomic_positions <= sig_df["end"].iloc[region])
+                    ]
+                    .T
+                    .flatten(),
+                    self.coverage[
+                        (self.chr == chr_name)
+                        & (self.genomic_positions >= sig_df["start"].iloc[region])
+                        & (self.genomic_positions <= sig_df["end"].iloc[region])
+                    ]
+                    .T
+                    .flatten(),
+                    sig_df["num_cpgs"].iloc[region],
+                    self.X, coef=coef,C=C
+                ) for region in range(sig_df.shape[0]) ])
+            
+            sig_df["stat"] = stat
+            sig_df["pval"] = pval
+            sig_df['fdr'] = multipletests(sig_df['pval'], method=padjust_method)[1]
+            
         return sig_df
     
     @staticmethod
-    def pql_loglik(count_vec: np.ndarray,
-                            total_vec: np.ndarray,
-                            beta: np.ndarray,
-                            phi: float,
-                            Sigma: np.ndarray,
-                            X_design: np.ndarray,
-                            cpg_idx: np.ndarray,
-                            sample_idx: np.ndarray) -> float:
-        """
-        Compute marginal PQL log-likelihood for arcsin-transformed beta-binomial LMM.
-        """
-        # working response
-        Zl = np.arcsin(2*(count_vec+0.1)/(total_vec+0.2) - 1)
-        # design
-        n_obs = Zl.size
-        Xmat = np.repeat(X_design, int(n_obs / X_design.shape[0]), axis=0)
-        # residual variances
-        Vd = total_vec / (1 + (total_vec - 1) * phi)
-        R = np.diag(Vd)
-        # random-effects design
-        J = X_design.shape[0]; m = int(n_obs / J)
-        Zr = np.zeros((n_obs, J*m))
-        for u in range(n_obs):
-            Zr[u, sample_idx[u]*m + cpg_idx[u]] = 1
-        # marginal V
-        V = Zr.dot(np.kron(np.eye(J), Sigma)).dot(Zr.T) + R
-        # residual
-        resid = Zl - Xmat.dot(beta)
-        # Cholesky
-        cf = cho_factor(V, lower=True)
-        logdet = 2 * np.sum(np.log(np.diag(cf[0])))
-        quad = resid.dot(cho_solve(cf, resid))
-        return -0.5 * (n_obs * np.log(2 * np.pi) + logdet + quad)
+    @ray.remote
+    def test_region(count_vec, 
+                    total_vec,
+                    num_cpgs,
+                    X,
+                    coef=None,
+                    C=None):
+            
+        # Setup cpg_idx and sample_idx arrays.
+        cpg_idx = np.tile(np.arange(num_cpgs), X.shape[0])
+        sample_idx = np.repeat(np.arange(X.shape[0]), num_cpgs)
+
+        # Full PQL mixed-effects fit
+        full = FitRegion(
+            X = np.repeat(X, num_cpgs, axis=0),
+            count = count_vec, total = total_vec,
+            cpg_idx = cpg_idx,
+            sample_idx = sample_idx
+        ).fit()
+        beta_full, phi_full, Sigma_full = full['beta'], full['phi'], full['Sigma']
+
+        # Wald test on coefficient or contrast
+        if coef is not None:
+            effect = np.array([(beta_full[coef]).sum()])
+            var_eff = np.array([(full['se'][coef]**2).sum()])
+        else:
+            effect = (beta_full * C).sum(axis=1)
+            var_eff = (full['se']**2 * C**2).sum(axis=1)
+        stat = effect / np.sqrt(var_eff)
+        pval = 2 * norm.sf(np.abs(stat))
+        return stat[0], pval[0]
     
     @staticmethod
-    def dm_logpmf(k, alpha):
-        """
-        Dirichlet‑Multinomial log‑pmf for one sample:
-        k:    array of counts length m
-        alpha: array of concentrations length m
-        returns scalar log P(k | alpha)
-        """
-        n = k.sum()
-        a0 = alpha.sum()
-        # log Γ(n+1) - sum log Γ(k_i+1)
-        part1 = gammaln(n+1) - np.sum(gammaln(k+1))
-        # [Γ(a0) - Γ(n+a0)] + sum[Γ(k_i+α_i) - Γ(α_i)]
-        part2 = gammaln(a0) - gammaln(n + a0) \
-                + np.sum(gammaln(k + alpha) - gammaln(alpha))
-        return part1 + part2
+    def test_region_local(count_vec, 
+                        total_vec,
+                        num_cpgs,
+                        X,
+                        coef=None,
+                        C=None):
+            
+        # Setup cpg_idx and sample_idx arrays.
+        cpg_idx = np.tile(np.arange(num_cpgs), X.shape[0])
+        sample_idx = np.repeat(np.arange(X.shape[0]), num_cpgs)
+
+        # Full PQL mixed-effects fit
+        full = FitRegion(
+            X = np.repeat(X, num_cpgs, axis=0),
+            count = count_vec, total = total_vec,
+            cpg_idx = cpg_idx,
+            sample_idx = sample_idx
+        ).fit()
+        beta_full, phi_full, Sigma_full = full['beta'], full['phi'], full['Sigma']
+
+        # Wald test on coefficient or contrast
+        if coef is not None:
+            effect = np.array([(beta_full[coef]).sum()])
+            var_eff = np.array([(full['se'][coef]**2).sum()])
+        else:
+            effect = (beta_full * C).sum(axis=1)
+            var_eff = (full['se']**2 * C**2).sum(axis=1)
+        stat = effect / np.sqrt(var_eff)
+        pval = 2 * norm.sf(np.abs(stat))
+        return stat[0], pval[0]
 
     def find_significant_regions_HMM(self,
                                      cpg_res: pd.DataFrame, 
