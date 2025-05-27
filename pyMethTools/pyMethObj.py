@@ -175,15 +175,15 @@ class pyMethObj():
         self.disp_intercept = []
 
     def fit_betabinom(self,
-                     ncpu: int=1,
-                     start_params: List[float]=[],
-                     maxiter: Optional[int]=None,
-                     maxfev: Optional[int]=None,
-                     link: str="arcsin",
-                     fit_method: str="gls",
-                     chunksize: int=1,
-                     X: Optional[np.ndarray]=None,
-                     return_params: bool=False) -> Optional[List[np.ndarray]]:
+                     ncpu: int = 1,
+                     start_params: List[float] = [],
+                     maxiter: Optional[int] = None,
+                     maxfev: Optional[int] = None,
+                     link: str = "arcsin",
+                     fit_method: str = "gls",
+                     chunksize: int = 1000,
+                     X: Optional[np.ndarray] = None,
+                     return_params: bool = False) -> Optional[List[np.ndarray]]:
         """
         Fit beta binomial model to DNA methylation data, with optional parallel processing.
     
@@ -395,14 +395,14 @@ class pyMethObj():
                   X_id: np.ndarray,
                   X_star_id: np.ndarray,
                   fit_cpg: Callable,
-                  maxiter: int=150,
-                  maxfev: int=150,
-                  start_params: List[float]=[],
-                  param_names_abd: List[str]=["intercept"],
-                  param_names_disp: List[str]=["intercept"],
+                  maxiter: int = 150,
+                  maxfev: int = 150,
+                  start_params: List[float] = [],
+                  param_names_abd: List[str] = ["intercept"],
+                  param_names_disp: List[str] = ["intercept"],
                   link: str="arcsin",
                   fit_method: str="gls",
-                  sample_weights: Optional[np.ndarray]=None) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+                  sample_weights: Optional[np.ndarray] = None) -> Tuple[List[np.ndarray], List[np.ndarray]]:
         """
         Fit beta-binomial models to a specific region in parallel using Ray.
         
@@ -447,12 +447,12 @@ class pyMethObj():
                         X_star: np.ndarray,
                         maxiter: int=150,
                         maxfev: int=150,
-                        start_params: List[float]=[],
-                        param_names_abd: List[str]=["intercept"],
-                        param_names_disp: List[str]=["intercept"],
-                        link: str="arcsin",
-                        fit_method: str="gls",
-                        sample_weights: Optional[np.ndarray]=None) -> Tuple[np.ndarray, np.ndarray]:
+                        start_params: List[float] = [],
+                        param_names_abd: List[str] = ["intercept"],
+                        param_names_disp: List[str] = ["intercept"],
+                        link: str = "arcsin",
+                        fit_method: str = "gls",
+                        sample_weights: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
         """
         Fit a beta-binomial model to a single CpG site.
         
@@ -497,7 +497,7 @@ class pyMethObj():
     def fit_cpg_local(self,
                      X: np.ndarray,
                      cpg: int,
-                     start_params: List[float]=[]) -> Tuple[np.ndarray, np.ndarray]:
+                     start_params: List[float] = []) -> Tuple[np.ndarray, np.ndarray]:
         """
         Fit a beta-binomial model to a single CpG site using object instance data.
         
@@ -520,13 +520,13 @@ class pyMethObj():
             implementation of the beta-binomial fitting process.
         """
         cc = FitCpG(
-                    total=self.coverage[cpg][~np.isnan(self.meth[cpg])],
-                    count=self.meth[cpg][~np.isnan(self.meth[cpg])],
-                    X=X[~np.isnan(self.meth[cpg])],
-                    X_star=self.X_star[~np.isnan(self.meth[cpg])],
-                    link=self.link,
-                    fit_method=self.fit_method,
-                    sample_weights=self.sample_weights
+                    total = self.coverage[cpg][~np.isnan(self.meth[cpg])],
+                    count = self.meth[cpg][~np.isnan(self.meth[cpg])],
+                    X = X[~np.isnan(self.meth[cpg])],
+                    X_star = self.X_star[~np.isnan(self.meth[cpg])],
+                    link = self.link,
+                    fit_method = self.fit_method,
+                    sample_weights = self.sample_weights
                 )
         e_m = cc.fit(maxiter=self.maxiter,maxfev=self.maxfev,start_params=start_params)
         return e_m.x,e_m.se_beta0
@@ -535,7 +535,7 @@ class pyMethObj():
                         X: np.ndarray,
                         cpgs: np.ndarray,
                         region: Union[int, str],
-                        start_params: List[float]=[]) -> Tuple[np.ndarray, np.ndarray]:
+                        start_params: List[float] = []) -> Tuple[np.ndarray, np.ndarray]:
         """
         Fit beta-binomial models to all CpGs in a region using non-parallelized processing.
         
@@ -571,14 +571,14 @@ class pyMethObj():
                coverage: np.ndarray,
                X: np.ndarray,
                X_star: np.ndarray,
-               maxiter: int=150,
-               maxfev: int=150,
-               start_params: List[float]=[],
-               param_names_abd: List[str]=["intercept"],
-               param_names_disp: List[str]=["intercept"],
-               link: str="arcsin",
-               fit_method: str="gls",
-               sample_weights: Optional[np.ndarray]=None) -> Tuple[np.ndarray, np.ndarray]:
+               maxiter: int = 150,
+               maxfev: int = 150,
+               start_params: List[float] = [],
+               param_names_abd: List[str] = ["intercept"],
+               param_names_disp: List[str] = ["intercept"],
+               link: str = "arcsin",
+               fit_method: str = "gls",
+               sample_weights: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
         """
         Fit a beta-binomial model to a single CpG site using Ray for parallel processing.
         
@@ -623,10 +623,10 @@ class pyMethObj():
         return e_m.x,e_m.se_beta0
 
     def smooth(self,
-              lambda_factor: float=10,
-              param: str="intercept",
-              ncpu: int=1,
-              chunksize: int=1) -> None:
+              lambda_factor: float = 10,
+              param: str = "intercept",
+              ncpu: int = 1,
+              chunksize: int = 1000) -> None:
         """
         Smooth the fitted beta-binomial parameters across genomic positions.
         
@@ -685,7 +685,7 @@ class pyMethObj():
                     smooth_region: Callable,
                     unique: Callable,
                     lambda_factor: float,
-                    link: str="arcsin") -> List[np.ndarray]:
+                    link: str = "arcsin") -> List[np.ndarray]:
         """
         Process a chunk of regions for parallel smoothing of fitted parameters.
         
@@ -724,8 +724,8 @@ class pyMethObj():
                            n_par_abd: int,
                            genomic_positions: np.ndarray,
                            cov: np.ndarray,
-                           lambda_factor: float=10,
-                           link: str="arcsin") -> np.ndarray:
+                           lambda_factor: float = 10,
+                           link: str = "arcsin") -> np.ndarray:
         """
         Smooth fitted parameters for a region using a kernel-based approach.
         
@@ -788,8 +788,8 @@ class pyMethObj():
                      n_par_abd: int,
                      genomic_positions: np.ndarray,
                      cov: np.ndarray,
-                     lambda_factor: float=10,
-                     link: str="arcsin") -> np.ndarray:
+                     lambda_factor: float = 10,
+                     link: str = "arcsin") -> np.ndarray:
         """
         Smooth fitted parameters for a region using Ray for parallel processing.
         
@@ -844,20 +844,20 @@ class pyMethObj():
     
     def likelihood_ratio_test(
             self,
-            coef: Optional[Union[str, List[str]]]=None,
-            contrast: Optional[Union[Dict[str, float], np.ndarray]]=None,
-            padjust_method: str='fdr_bh',
-            find_dmrs: str='binary_search',
-            test_dmr_sig: bool=True,
-            prop_sig: float=0.5,
-            fdr_thresh: float=0.1,
-            max_gap: int=10000,
-            max_gap_cpgs: int=3,
-            min_cpgs: int=3,
-            n_states: int=3,
-            state_labels: Optional[Dict[int, str]]=None,
-            chunksize: int=1000,
-            ncpu: int=1) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.DataFrame]]:
+            coef: Optional[Union[str, List[str]]] = None,
+            contrast: Optional[Union[Dict[str, float], np.ndarray]] = None,
+            padjust_method: str = 'fdr_bh',
+            find_dmrs: str = 'binary_search',
+            test_dmr_sig: bool = True,
+            prop_sig: float = 0.5,
+            fdr_thresh: float = 0.1,
+            max_gap: int = 50000,
+            max_gap_cpgs: int = 3,
+            min_cpgs: int = 3,
+            n_states: int = 3,
+            state_labels: Optional[Dict[int, str]] = None,
+            chunksize: int = 1000,
+            ncpu: int = 1) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.DataFrame]]:
         """
         Compute LRT for beta-binomial regression fits via scipy.stats.betabinom.logpmf.
 
@@ -885,7 +885,7 @@ class pyMethObj():
             Proportion of significant CpGs required to define a DMR.
         fdr_thresh : float, default 0.1
             FDR threshold for identifying significant regions.
-        max_gap : int, default 10000
+        max_gap : int, default 50000
             Maximum genomic distance (in base pairs) between CpGs to consider them part of the same region.
         max_gap_cpgs : int, default 3
             Maximum number of non-significant CpGs allowed between significant CpGs in a region.
@@ -967,20 +967,20 @@ class pyMethObj():
     
     def wald_test(
         self,
-        coef: Optional[Union[str, List[str]]]=None,
-        contrast: Optional[Union[Dict[str, float], np.ndarray]]=None,
-        padjust_method: str='fdr_bh',
-        n_permute: int=0,
-        find_dmrs: str='binary_search',
-        test_dmr_sig: bool=True,
-        prop_sig: float=0.5,
-        fdr_thresh: float=0.1,
-        max_gap: int=10000,
-        max_gap_cpgs: int=3,
-        min_cpgs: int=3,
-        n_states: int=3,
-        state_labels: Optional[Dict[int, str]]=None,
-        ncpu: int=1
+        coef: Optional[Union[str, List[str]]] = None,
+        contrast: Optional[Union[Dict[str, float], np.ndarray]] = None,
+        padjust_method: str = 'fdr_bh',
+        n_permute: int = 0,
+        find_dmrs: str = 'binary_search',
+        test_dmr_sig: bool = True,
+        prop_sig: float = 0.5,
+        fdr_thresh: float = 0.1,
+        max_gap: int = 50000,
+        max_gap_cpgs: int = 3,
+        min_cpgs: int = 3,
+        n_states: int = 3,
+        state_labels: Optional[Dict[int, str]] = None,
+        ncpu: int = 1
     ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.DataFrame]]:
         """
         Perform Wald tests for individual coefficients or user-specified contrasts.
@@ -1011,7 +1011,7 @@ class pyMethObj():
             Proportion of significant CpGs required to define a DMR.
         fdr_thresh : float, default 0.1
             FDR threshold for identifying significant regions.
-        max_gap : int, default 10000
+        max_gap : int, default 50000
             Maximum genomic distance (in base pairs) between CpGs to consider them part of the same region.
         max_gap_cpgs : int, default 3
             Maximum number of non-significant CpGs allowed between significant CpGs in a region.
@@ -1184,7 +1184,7 @@ class pyMethObj():
                                 prop_sig: float = 0.5,
                                 fdr_thresh: float = 0.1,
                                 maxthresh: float = 0.5,
-                                max_gap: int = 10000,
+                                max_gap: int = 50000,
                                 min_cpgs: int = 3,
                                 max_gap_cpgs: int = 2,
                                 test_sig: bool = True,
@@ -1358,8 +1358,8 @@ class pyMethObj():
                     total_vec,
                     num_cpgs,
                     X,
-                    coef=None,
-                    C=None):
+                    coef = None,
+                    C = None):
             
         # Setup cpg_idx and sample_idx arrays.
         cpg_idx = np.tile(np.arange(num_cpgs), X.shape[0])
@@ -1390,8 +1390,8 @@ class pyMethObj():
                         total_vec,
                         num_cpgs,
                         X,
-                        coef=None,
-                        C=None):
+                        coef = None,
+                        C = None):
             
         # Setup cpg_idx and sample_idx arrays.
         cpg_idx = np.tile(np.arange(num_cpgs), X.shape[0])
@@ -1801,7 +1801,10 @@ class pyMethObj():
         return region_res
     
     @staticmethod
-    def init_transmat(n_states, self_prob=0.99, bg_prob=0.01, other_prob=0.0):
+    def init_transmat(n_states, 
+                      self_prob = 0.99, 
+                      bg_prob = 0.01, 
+                      other_prob = 0.0):
         """
         Create an n_states × n_states transition matrix where
         - each row i has A[i,i] = self_prob
@@ -1823,7 +1826,7 @@ class pyMethObj():
         return A
     
     @staticmethod
-    def init_means(n_states, radius=3.0, start_angle=0.0):
+    def init_means(n_states, radius = 3.0, start_angle = 0.0):
         """
         Initialize (n_states × 2) means so that:
         - The first coordinate (x) is always ≥ 0.
@@ -1844,7 +1847,7 @@ class pyMethObj():
 
         return np.vstack([np.array([0,0]),np.column_stack([x, y])])
     
-    def mixed_bb(self, c1=1e-3, max_iter=10):
+    def mixed_bb(self, c1 = 1e-3, max_iter = 10):
         # initial GLS to get β and φ
         gls_res = self.gls(c1)
         β = gls_res.x[:self.p]
@@ -1954,7 +1957,7 @@ class pyMethObj():
                               ncpu: int = 1,
                               maxiter: int = 500,
                               maxfev: int = 500,
-                              chunksize: int = 1) -> None:
+                              chunksize: int = 1000) -> None:
         """
         Identify co-distributed regions of CpGs with similar methylation patterns.
         
@@ -2492,7 +2495,7 @@ class pyMethObj():
                          prop_pos: float = 0.5,
                          sample_size: int = 100,
                          ncpu: int = 1,
-                         chunksize: int = 1) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, np.ndarray, List]]:
+                         chunksize: int = 1000) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, np.ndarray, List]]:
         """
         Simulate methylation data based on fitted beta-binomial models.
         
