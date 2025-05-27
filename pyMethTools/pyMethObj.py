@@ -1293,7 +1293,7 @@ class pyMethObj():
 
         sig_df = pd.DataFrame(significant_regions)
 
-        if test_sig:
+        if test_sig and not sig_df.empty:
             # Test the significance of each region using a mixed-effects model.
 
             if ncpu > 1:
