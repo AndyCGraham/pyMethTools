@@ -24,8 +24,8 @@ class FitCpG():
         These must be in the same length and orientation as covariates
         
     """
-    def __init__(self, total, count, X=None, X_star=None, phi_init=0.5,link="arcsin",
-                 fit_method="gls",sample_weights=None,theta=None,c0=0.1):
+    def __init__(self, total, count, X = None, X_star = None, phi_init = 0.5,link = "arcsin",
+                 fit_method = "gls",sample_weights = None,theta = None,c0 = 0.1):
         # Assertions here TODO
         
         if sample_weights is not None:
@@ -121,10 +121,6 @@ class FitCpG():
         return(
             list(m.params) + ([np.arcsin(np.sqrt(dispersion_est))] * self.n_param_disp)
         )
-
-    @staticmethod
-    def objective(beta, X, X_star, count, total, n_param_abd, n_param_disp):
-        return bbll.bbll(beta, X, X_star, count, total, n_param_abd, n_param_disp)
 
     # Define the log-likelihood for beta-binomial regression (simplified version)
     def beta_binomial_log_likelihood(self, beta):
@@ -236,7 +232,7 @@ class FitCpG():
     
         return Hessian
     
-    def gls(self, c1=0.001):
+    def gls(self, c1 = 0.001):
         """
         Fits the model using a two-stage weighted least squares procedure.
         """
@@ -331,7 +327,12 @@ class FitCpG():
         res.var = var_beta0
         return res
         
-    def fit(self, start_params=[], maxiter=10000, maxfev=5000, minimize_method='Nelder-Mead', **kwds):
+    def fit(self, 
+            start_params = [], 
+            maxiter = 10000, 
+            maxfev = 5000, 
+            minimize_method = 'Nelder-Mead',
+            **kwds):
         # Fit the model using Nelder-Mead method and scipy minimize
         if self.fit_method=="gls":
             minimize_res = self.gls()

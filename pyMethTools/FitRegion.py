@@ -4,7 +4,7 @@ from scipy.optimize import OptimizeResult
 
 class FitRegion:
     def __init__(self, X, count, total, cpg_idx, sample_idx, sample_weights=None,
-                 link="arcsin", fit_method="gls", theta=None, c0=0.1):
+                 link = "arcsin", fit_method = "gls", theta = None, c0 = 0.1):
         """
         X:         (n_obs × p) fixed‑effect design
         count:     (n_obs,) methylated counts
@@ -56,7 +56,7 @@ class FitRegion:
         self.execution_time = None
         self.fit_out = None
 
-    def gls(self, c1=0.001):
+    def gls(self, c1 = 0.001):
         """
         Fits the model using a two-stage weighted least squares procedure.
         """
@@ -151,7 +151,7 @@ class FitRegion:
         res.var = var_beta0
         return res
 
-    def fit(self, tol=1e-6, max_iter=50):
+    def fit(self, tol = 1e-6, max_iter = 50):
         # 1) initial GLS fit
         res = self.gls()
         β, φ = res.x[:-1], res.x[-1]

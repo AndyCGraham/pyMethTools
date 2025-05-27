@@ -93,8 +93,17 @@ class pyMethObj():
             )
         """
 
+        # Check methylation data is as expected
+        assert isinstance(meth,np.ndarray), "meth must be a 2d numpy array"
+        assert len(meth.shape) == 2, "meth must be a 2d numpy array"
+        assert np.all(meth % 1 == 0), "meth must contain counts, e.g. 1.0 or 1 not 1.05"
+        assert isinstance(coverage,np.ndarray), "coverage must be a 2d numpy array"
+        assert len(coverage.shape) == 2, "coverage must be a 2d numpy array"
+        assert np.all(coverage % 1 == 0), "coverage must contain counts, e.g. 1.0 or 1 not 1.05"
+        assert np.all(coverage - meth >= 0), "coverage counts must be at least equal to their respective meth count"
         assert meth.shape == coverage.shape, "'meth' and 'coverage' must have the same shape"
         assert meth.shape[0] == len(target_regions), "Length of 'target_regions' should be equal to the number of rows (cpgs) in meth"
+
         if genomic_positions is not None:
             assert meth.shape[0] == len(genomic_positions), "Length of 'genomic_positions' should be equal to the number of rows (cpgs) in meth"
             isinstance(genomic_positions,np.ndarray), "'genomic_positions' should be a numpy array of integer positions"
@@ -166,15 +175,15 @@ class pyMethObj():
         self.disp_intercept = []
 
     def fit_betabinom(self,
-                     ncpu: int=1,
-                     start_params: List[float]=[],
-                     maxiter: Optional[int]=None,
-                     maxfev: Optional[int]=None,
-                     link: str="arcsin",
-                     fit_method: str="gls",
-                     chunksize: int=1,
-                     X: Optional[np.ndarray]=None,
-                     return_params: bool=False) -> Optional[List[np.ndarray]]:
+                     ncpu: int = 1,
+                     start_params: List[float] = [],
+                     maxiter: Optional[int] = None,
+                     maxfev: Optional[int] = None,
+                     link: str = "arcsin",
+                     fit_method: str = "gls",
+                     chunksize: int = 1000,
+                     X: Optional[np.ndarray] = None,
+                     return_params: bool = False) -> Optional[List[np.ndarray]]:
         """
         Fit beta binomial model to DNA methylation data, with optional parallel processing.
     
@@ -386,14 +395,14 @@ class pyMethObj():
                   X_id: np.ndarray,
                   X_star_id: np.ndarray,
                   fit_cpg: Callable,
-                  maxiter: int=150,
-                  maxfev: int=150,
-                  start_params: List[float]=[],
-                  param_names_abd: List[str]=["intercept"],
-                  param_names_disp: List[str]=["intercept"],
+                  maxiter: int = 150,
+                  maxfev: int = 150,
+                  start_params: List[float] = [],
+                  param_names_abd: List[str] = ["intercept"],
+                  param_names_disp: List[str] = ["intercept"],
                   link: str="arcsin",
                   fit_method: str="gls",
-                  sample_weights: Optional[np.ndarray]=None) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+                  sample_weights: Optional[np.ndarray] = None) -> Tuple[List[np.ndarray], List[np.ndarray]]:
         """
         Fit beta-binomial models to a specific region in parallel using Ray.
         
@@ -438,12 +447,12 @@ class pyMethObj():
                         X_star: np.ndarray,
                         maxiter: int=150,
                         maxfev: int=150,
-                        start_params: List[float]=[],
-                        param_names_abd: List[str]=["intercept"],
-                        param_names_disp: List[str]=["intercept"],
-                        link: str="arcsin",
-                        fit_method: str="gls",
-                        sample_weights: Optional[np.ndarray]=None) -> Tuple[np.ndarray, np.ndarray]:
+                        start_params: List[float] = [],
+                        param_names_abd: List[str] = ["intercept"],
+                        param_names_disp: List[str] = ["intercept"],
+                        link: str = "arcsin",
+                        fit_method: str = "gls",
+                        sample_weights: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
         """
         Fit a beta-binomial model to a single CpG site.
         
@@ -488,7 +497,7 @@ class pyMethObj():
     def fit_cpg_local(self,
                      X: np.ndarray,
                      cpg: int,
-                     start_params: List[float]=[]) -> Tuple[np.ndarray, np.ndarray]:
+                     start_params: List[float] = []) -> Tuple[np.ndarray, np.ndarray]:
         """
         Fit a beta-binomial model to a single CpG site using object instance data.
         
@@ -511,13 +520,13 @@ class pyMethObj():
             implementation of the beta-binomial fitting process.
         """
         cc = FitCpG(
-                    total=self.coverage[cpg][~np.isnan(self.meth[cpg])],
-                    count=self.meth[cpg][~np.isnan(self.meth[cpg])],
-                    X=X[~np.isnan(self.meth[cpg])],
-                    X_star=self.X_star[~np.isnan(self.meth[cpg])],
-                    link=self.link,
-                    fit_method=self.fit_method,
-                    sample_weights=self.sample_weights
+                    total = self.coverage[cpg][~np.isnan(self.meth[cpg])],
+                    count = self.meth[cpg][~np.isnan(self.meth[cpg])],
+                    X = X[~np.isnan(self.meth[cpg])],
+                    X_star = self.X_star[~np.isnan(self.meth[cpg])],
+                    link = self.link,
+                    fit_method = self.fit_method,
+                    sample_weights = self.sample_weights
                 )
         e_m = cc.fit(maxiter=self.maxiter,maxfev=self.maxfev,start_params=start_params)
         return e_m.x,e_m.se_beta0
@@ -526,7 +535,7 @@ class pyMethObj():
                         X: np.ndarray,
                         cpgs: np.ndarray,
                         region: Union[int, str],
-                        start_params: List[float]=[]) -> Tuple[np.ndarray, np.ndarray]:
+                        start_params: List[float] = []) -> Tuple[np.ndarray, np.ndarray]:
         """
         Fit beta-binomial models to all CpGs in a region using non-parallelized processing.
         
@@ -562,14 +571,14 @@ class pyMethObj():
                coverage: np.ndarray,
                X: np.ndarray,
                X_star: np.ndarray,
-               maxiter: int=150,
-               maxfev: int=150,
-               start_params: List[float]=[],
-               param_names_abd: List[str]=["intercept"],
-               param_names_disp: List[str]=["intercept"],
-               link: str="arcsin",
-               fit_method: str="gls",
-               sample_weights: Optional[np.ndarray]=None) -> Tuple[np.ndarray, np.ndarray]:
+               maxiter: int = 150,
+               maxfev: int = 150,
+               start_params: List[float] = [],
+               param_names_abd: List[str] = ["intercept"],
+               param_names_disp: List[str] = ["intercept"],
+               link: str = "arcsin",
+               fit_method: str = "gls",
+               sample_weights: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
         """
         Fit a beta-binomial model to a single CpG site using Ray for parallel processing.
         
@@ -614,10 +623,10 @@ class pyMethObj():
         return e_m.x,e_m.se_beta0
 
     def smooth(self,
-              lambda_factor: float=10,
-              param: str="intercept",
-              ncpu: int=1,
-              chunksize: int=1) -> None:
+              lambda_factor: float = 10,
+              param: str = "intercept",
+              ncpu: int = 1,
+              chunksize: int = 1000) -> None:
         """
         Smooth the fitted beta-binomial parameters across genomic positions.
         
@@ -676,7 +685,7 @@ class pyMethObj():
                     smooth_region: Callable,
                     unique: Callable,
                     lambda_factor: float,
-                    link: str="arcsin") -> List[np.ndarray]:
+                    link: str = "arcsin") -> List[np.ndarray]:
         """
         Process a chunk of regions for parallel smoothing of fitted parameters.
         
@@ -715,8 +724,8 @@ class pyMethObj():
                            n_par_abd: int,
                            genomic_positions: np.ndarray,
                            cov: np.ndarray,
-                           lambda_factor: float=10,
-                           link: str="arcsin") -> np.ndarray:
+                           lambda_factor: float = 10,
+                           link: str = "arcsin") -> np.ndarray:
         """
         Smooth fitted parameters for a region using a kernel-based approach.
         
@@ -779,8 +788,8 @@ class pyMethObj():
                      n_par_abd: int,
                      genomic_positions: np.ndarray,
                      cov: np.ndarray,
-                     lambda_factor: float=10,
-                     link: str="arcsin") -> np.ndarray:
+                     lambda_factor: float = 10,
+                     link: str = "arcsin") -> np.ndarray:
         """
         Smooth fitted parameters for a region using Ray for parallel processing.
         
@@ -835,19 +844,20 @@ class pyMethObj():
     
     def likelihood_ratio_test(
             self,
-            coef: Optional[Union[str, List[str]]]=None,
-            contrast: Optional[Union[Dict[str, float], np.ndarray]]=None,
-            padjust_method: str='fdr_bh',
-            find_dmrs: str='binary_search',
-            prop_sig: float=0.5,
-            fdr_thresh: float=0.1,
-            max_gap: int=10000,
-            max_gap_cpgs: int=3,
-            min_cpgs: int=3,
-            n_states: int=3,
-            state_labels: Optional[Dict[int, str]]=None,
-            chunksize: int=1000,
-            ncpu: int=1) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.DataFrame]]:
+            coef: Optional[Union[str, List[str]]] = None,
+            contrast: Optional[Union[Dict[str, float], np.ndarray]] = None,
+            padjust_method: str = 'fdr_bh',
+            find_dmrs: str = 'binary_search',
+            test_dmr_sig: bool = True,
+            prop_sig: float = 0.5,
+            fdr_thresh: float = 0.1,
+            max_gap: int = 50000,
+            max_gap_cpgs: int = 3,
+            min_cpgs: int = 3,
+            n_states: int = 3,
+            state_labels: Optional[Dict[int, str]] = None,
+            chunksize: int = 1000,
+            ncpu: int = 1) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.DataFrame]]:
         """
         Compute LRT for beta-binomial regression fits via scipy.stats.betabinom.logpmf.
 
@@ -868,11 +878,14 @@ class pyMethObj():
             - 'binary_search': Use binary search to find significant regions.
             - 'HMM': Use a Hidden Markov Model to identify regions.
             - None: Do not identify DMRs.
+        test_dmr_sig : bool, default True
+            Whether to test the statistical signficance of found dmrs using a mixed-effects beta-binomial 
+            regression.
         prop_sig : float, default 0.5
             Proportion of significant CpGs required to define a DMR.
         fdr_thresh : float, default 0.1
             FDR threshold for identifying significant regions.
-        max_gap : int, default 10000
+        max_gap : int, default 50000
             Maximum genomic distance (in base pairs) between CpGs to consider them part of the same region.
         max_gap_cpgs : int, default 3
             Maximum number of non-significant CpGs allowed between significant CpGs in a region.
@@ -939,13 +952,14 @@ class pyMethObj():
 
         if find_dmrs == 'binary_search':
             dmr_res = self.find_significant_regions(cpg_res,prop_sig=prop_sig,fdr_thresh=fdr_thresh,max_gap=max_gap,
-                                                    max_gap_cpgs=max_gap_cpgs, coef=coef_indices)
+                                                    max_gap_cpgs=max_gap_cpgs, coef=coef_indices, test_sig=test_dmr_sig)
             return cpg_res, dmr_res
         
         elif find_dmrs == 'HMM':
             dmr_res = self.find_significant_regions_HMM(cpg_res, n_states=n_states, min_cpgs=min_cpgs, fdr_thresh=fdr_thresh, 
                                                         prop_sig_thresh=prop_sig, state_labels=state_labels, 
-                                                        hmm_plots=False, hmm_internals=False, coef=coef_indices)
+                                                        hmm_plots=False, hmm_internals=False, coef=coef_indices, 
+                                                        test_sig=test_dmr_sig)
             return cpg_res, dmr_res
         
         else:
@@ -953,19 +967,20 @@ class pyMethObj():
     
     def wald_test(
         self,
-        coef: Optional[Union[str, List[str]]]=None,
-        contrast: Optional[Union[Dict[str, float], np.ndarray]]=None,
-        padjust_method: str='fdr_bh',
-        n_permute: int=0,
-        find_dmrs: str='binary_search',
-        prop_sig: float=0.5,
-        fdr_thresh: float=0.1,
-        max_gap: int=10000,
-        max_gap_cpgs: int=3,
-        min_cpgs: int=3,
-        n_states: int=3,
-        state_labels: Optional[Dict[int, str]]=None,
-        ncpu: int=1
+        coef: Optional[Union[str, List[str]]] = None,
+        contrast: Optional[Union[Dict[str, float], np.ndarray]] = None,
+        padjust_method: str = 'fdr_bh',
+        n_permute: int = 0,
+        find_dmrs: str = 'binary_search',
+        test_dmr_sig: bool = True,
+        prop_sig: float = 0.5,
+        fdr_thresh: float = 0.1,
+        max_gap: int = 50000,
+        max_gap_cpgs: int = 3,
+        min_cpgs: int = 3,
+        n_states: int = 3,
+        state_labels: Optional[Dict[int, str]] = None,
+        ncpu: int = 1
     ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.DataFrame]]:
         """
         Perform Wald tests for individual coefficients or user-specified contrasts.
@@ -989,11 +1004,14 @@ class pyMethObj():
             - 'binary_search': Use binary search to find significant regions.
             - 'HMM': Use a Hidden Markov Model to identify regions.
             - None: Do not identify DMRs.
+        test_dmr_sig : bool, default True
+            Whether to test the statistical signficance of found dmrs using a mixed-effects beta-binomial 
+            regression.
         prop_sig : float, default 0.5
             Proportion of significant CpGs required to define a DMR.
         fdr_thresh : float, default 0.1
             FDR threshold for identifying significant regions.
-        max_gap : int, default 10000
+        max_gap : int, default 50000
             Maximum genomic distance (in base pairs) between CpGs to consider them part of the same region.
         max_gap_cpgs : int, default 3
             Maximum number of non-significant CpGs allowed between significant CpGs in a region.
@@ -1118,7 +1136,7 @@ class pyMethObj():
             
         if find_dmrs == 'binary_search':
             dmr_res = self.find_significant_regions(res,prop_sig=prop_sig,fdr_thresh=fdr_thresh,max_gap=max_gap,
-                                                    max_gap_cpgs=max_gap_cpgs,C=C)
+                                                    max_gap_cpgs=max_gap_cpgs,C=C,test_sig=test_dmr_sig,ncpu=ncpu)
             if (n_permute > 1) and (not dmr_res.empty):
                 permuted_dmrs = []
                 for perm in range(n_permute):
@@ -1138,8 +1156,9 @@ class pyMethObj():
                                         })
                     permuted_dmrs.append(self.find_significant_regions(perm_res,prop_sig=prop_sig,
                                                                        fdr_thresh=fdr_thresh,max_gap=max_gap,
-                                                                       min_cpgs=min_cpgs,
-                                                                       max_gap_cpgs=max_gap_cpgs))
+                                                                       min_cpgs=min_cpgs, 
+                                                                       max_gap_cpgs=max_gap_cpgs,
+                                                                       test_sig=test_dmr_sig,ncpu=ncpu))
 
                 # Concatenate the permuted DMRs, if none found add one with 0 cpgs
                 permuted_prop_sig_cpgs = [perm.prop_sig_cpgs.values if not perm.empty else np.array([0]) for perm in permuted_dmrs]
@@ -1154,7 +1173,7 @@ class pyMethObj():
         elif find_dmrs == 'HMM':
             dmr_res = self.find_significant_regions_HMM(res, n_states=n_states, min_cpgs=min_cpgs, fdr_thresh=fdr_thresh, 
                                                         prop_sig_thresh=prop_sig, state_labels=state_labels, 
-                                                        hmm_plots=False, hmm_internals=False, coef=idx)
+                                                        hmm_plots=False, hmm_internals=False, coef=idx, ncpu=ncpu)
             return res, dmr_res
 
         else:
@@ -1165,13 +1184,14 @@ class pyMethObj():
                                 prop_sig: float = 0.5,
                                 fdr_thresh: float = 0.1,
                                 maxthresh: float = 0.5,
-                                max_gap: int = 10000,
+                                max_gap: int = 50000,
                                 min_cpgs: int = 3,
                                 max_gap_cpgs: int = 2,
                                 test_sig: bool = True,
                                 coef: str = None,
                                 C: np.array = None,
-                                padjust_method: str = 'fdr_bh') -> pd.DataFrame:
+                                padjust_method: str = 'fdr_bh',
+                                ncpu: int = 1) -> pd.DataFrame:
         """
         Find regions of adjacent CpGs where:
         - The gap between successive CpGs is less than max_gap.
@@ -1196,6 +1216,7 @@ class pyMethObj():
             coef (str): Name of the coefficient to test, if test_sig is True. 
             C (np.array): Contrast matrix for the test, if test_sig is True.
             padjust_method (str): Method for adjusting p-values, if test_sig is True.
+            ncpu (int, default = 1): Number of CPUs to use for parallel computation.
 
         Returns:
             pd.DataFrame: DataFrame with columns 'chr', 'start', 'end', 'num_cpgs',
@@ -1261,107 +1282,140 @@ class pyMethObj():
                 end, best_num_sig, _, final_prop, best_region = candidate_regions[0]
                 num_cpgs = len(best_region)
 
-                # Extract counts & coverage for the region.
-                count_vec = self.meth[(self.chr == chr_name) &
-                                    (self.genomic_positions >= best_region['pos'].iloc[0]) &
-                                    (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten()
-                total_vec = self.coverage[(self.chr == chr_name) &
-                                        (self.genomic_positions >= best_region['pos'].iloc[0]) &
-                                        (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten()
-                cpg_idx = np.tile(np.arange(num_cpgs), self.X.shape[0])
-                sample_idx = np.repeat(np.arange(self.X.shape[0]), num_cpgs)
-
-                if test_sig:
-                    # Full PQL mixed-effects fit
-                    full = FitRegion(
-                        X = np.repeat(self.X, num_cpgs, axis=0),
-                        count = count_vec, total = total_vec,
-                        cpg_idx = cpg_idx,
-                        sample_idx = sample_idx
-                    ).fit()
-                    beta_full, phi_full, Sigma_full = full['beta'], full['phi'], full['Sigma']
-
-                    # Wald test on coefficient or contrast
-                    if coef is not None:
-                        effect = np.array([(beta_full[coef]).sum()])
-                        var_eff = np.array([(full['se'][coef]**2).sum()])
-                    else:
-                        effect = (beta_full * C).sum(axis=1)
-                        var_eff = (full['se']**2 * C**2).sum(axis=1)
-                    stat = effect / np.sqrt(var_eff)
-                    pval = 2 * norm.sf(np.abs(stat))
-                    significant_regions.append({
-                        'chr': chr_name, 'start': best_region['pos'].iloc[0],
-                        'end': best_region['pos'].iloc[-1], 'num_cpgs': num_cpgs,
-                        'num_sig_cpgs': best_num_sig, 'prop_sig_cpgs': final_prop,
-                        'stat': stat[0], 'pval': pval[0]
-                    })
-                else:
-                    significant_regions.append({
+                significant_regions.append({
                         'chr': chr_name, 'start': best_region['pos'].iloc[0],
                         'end': best_region['pos'].iloc[-1], 'num_cpgs': num_cpgs,
                         'num_sig_cpgs': best_num_sig, 'prop_sig_cpgs': final_prop
                     })
-
+                
                 used_cpgs.update(range(i, end+1))
                 i = end + 1
 
-            sig_df = pd.DataFrame(significant_regions)
-            if 'pval' in sig_df:
-                sig_df['fdr'] = multipletests(sig_df['pval'], method=padjust_method)[1]
+        sig_df = pd.DataFrame(significant_regions)
+
+        if test_sig:
+            # Test the significance of each region using a mixed-effects model.
+
+            if ncpu > 1:
+                ray.init(num_cpus=ncpu)
+                (
+                    stat,
+                    pval
+                ) = zip(*ray.get([
+                    self.test_region.remote(
+                    self.meth[
+                        (self.chr == chr_name)
+                        & (self.genomic_positions >= sig_df["start"].iloc[region])
+                        & (self.genomic_positions <= sig_df["end"].iloc[region])
+                    ]
+                    .T
+                    .flatten(),
+                    self.coverage[
+                        (self.chr == chr_name)
+                        & (self.genomic_positions >= sig_df["start"].iloc[region])
+                        & (self.genomic_positions <= sig_df["end"].iloc[region])
+                    ]
+                    .T
+                    .flatten(),
+                    sig_df["num_cpgs"].iloc[region],
+                    self.X, coef=coef,C=C
+                ) for region in range(sig_df.shape[0]) ]))
+                
+
+            else:
+                (
+                    stat,
+                    pval,
+                ) = zip(*[
+                    self.test_region_local(
+                    self.meth[
+                        (self.chr == chr_name)
+                        & (self.genomic_positions >= sig_df["start"].iloc[region])
+                        & (self.genomic_positions <= sig_df["end"].iloc[region])
+                    ]
+                    .T
+                    .flatten(),
+                    self.coverage[
+                        (self.chr == chr_name)
+                        & (self.genomic_positions >= sig_df["start"].iloc[region])
+                        & (self.genomic_positions <= sig_df["end"].iloc[region])
+                    ]
+                    .T
+                    .flatten(),
+                    sig_df["num_cpgs"].iloc[region],
+                    self.X, coef=coef,C=C
+                ) for region in range(sig_df.shape[0]) ])
+            
+            sig_df["stat"] = stat
+            sig_df["pval"] = pval
+            sig_df['fdr'] = multipletests(sig_df['pval'], method=padjust_method)[1]
+            
         return sig_df
     
     @staticmethod
-    def pql_loglik(count_vec: np.ndarray,
-                            total_vec: np.ndarray,
-                            beta: np.ndarray,
-                            phi: float,
-                            Sigma: np.ndarray,
-                            X_design: np.ndarray,
-                            cpg_idx: np.ndarray,
-                            sample_idx: np.ndarray) -> float:
-        """
-        Compute marginal PQL log-likelihood for arcsin-transformed beta-binomial LMM.
-        """
-        # working response
-        Zl = np.arcsin(2*(count_vec+0.1)/(total_vec+0.2) - 1)
-        # design
-        n_obs = Zl.size
-        Xmat = np.repeat(X_design, int(n_obs / X_design.shape[0]), axis=0)
-        # residual variances
-        Vd = total_vec / (1 + (total_vec - 1) * phi)
-        R = np.diag(Vd)
-        # random-effects design
-        J = X_design.shape[0]; m = int(n_obs / J)
-        Zr = np.zeros((n_obs, J*m))
-        for u in range(n_obs):
-            Zr[u, sample_idx[u]*m + cpg_idx[u]] = 1
-        # marginal V
-        V = Zr.dot(np.kron(np.eye(J), Sigma)).dot(Zr.T) + R
-        # residual
-        resid = Zl - Xmat.dot(beta)
-        # Cholesky
-        cf = cho_factor(V, lower=True)
-        logdet = 2 * np.sum(np.log(np.diag(cf[0])))
-        quad = resid.dot(cho_solve(cf, resid))
-        return -0.5 * (n_obs * np.log(2 * np.pi) + logdet + quad)
+    @ray.remote
+    def test_region(count_vec, 
+                    total_vec,
+                    num_cpgs,
+                    X,
+                    coef = None,
+                    C = None):
+            
+        # Setup cpg_idx and sample_idx arrays.
+        cpg_idx = np.tile(np.arange(num_cpgs), X.shape[0])
+        sample_idx = np.repeat(np.arange(X.shape[0]), num_cpgs)
+
+        # Full PQL mixed-effects fit
+        full = FitRegion(
+            X = np.repeat(X, num_cpgs, axis=0),
+            count = count_vec, total = total_vec,
+            cpg_idx = cpg_idx,
+            sample_idx = sample_idx
+        ).fit()
+        beta_full, phi_full, Sigma_full = full['beta'], full['phi'], full['Sigma']
+
+        # Wald test on coefficient or contrast
+        if coef is not None:
+            effect = np.array([(beta_full[coef]).sum()])
+            var_eff = np.array([(full['se'][coef]**2).sum()])
+        else:
+            effect = (beta_full * C).sum(axis=1)
+            var_eff = (full['se']**2 * C**2).sum(axis=1)
+        stat = effect / np.sqrt(var_eff)
+        pval = 2 * norm.sf(np.abs(stat))
+        return stat[0], pval[0]
     
     @staticmethod
-    def dm_logpmf(k, alpha):
-        """
-        Dirichlet‑Multinomial log‑pmf for one sample:
-        k:    array of counts length m
-        alpha: array of concentrations length m
-        returns scalar log P(k | alpha)
-        """
-        n = k.sum()
-        a0 = alpha.sum()
-        # log Γ(n+1) - sum log Γ(k_i+1)
-        part1 = gammaln(n+1) - np.sum(gammaln(k+1))
-        # [Γ(a0) - Γ(n+a0)] + sum[Γ(k_i+α_i) - Γ(α_i)]
-        part2 = gammaln(a0) - gammaln(n + a0) \
-                + np.sum(gammaln(k + alpha) - gammaln(alpha))
-        return part1 + part2
+    def test_region_local(count_vec, 
+                        total_vec,
+                        num_cpgs,
+                        X,
+                        coef = None,
+                        C = None):
+            
+        # Setup cpg_idx and sample_idx arrays.
+        cpg_idx = np.tile(np.arange(num_cpgs), X.shape[0])
+        sample_idx = np.repeat(np.arange(X.shape[0]), num_cpgs)
+
+        # Full PQL mixed-effects fit
+        full = FitRegion(
+            X = np.repeat(X, num_cpgs, axis=0),
+            count = count_vec, total = total_vec,
+            cpg_idx = cpg_idx,
+            sample_idx = sample_idx
+        ).fit()
+        beta_full, phi_full, Sigma_full = full['beta'], full['phi'], full['Sigma']
+
+        # Wald test on coefficient or contrast
+        if coef is not None:
+            effect = np.array([(beta_full[coef]).sum()])
+            var_eff = np.array([(full['se'][coef]**2).sum()])
+        else:
+            effect = (beta_full * C).sum(axis=1)
+            var_eff = (full['se']**2 * C**2).sum(axis=1)
+        stat = effect / np.sqrt(var_eff)
+        pval = 2 * norm.sf(np.abs(stat))
+        return stat[0], pval[0]
 
     def find_significant_regions_HMM(self,
                                      cpg_res: pd.DataFrame, 
@@ -1747,7 +1801,10 @@ class pyMethObj():
         return region_res
     
     @staticmethod
-    def init_transmat(n_states, self_prob=0.99, bg_prob=0.01, other_prob=0.0):
+    def init_transmat(n_states, 
+                      self_prob = 0.99, 
+                      bg_prob = 0.01, 
+                      other_prob = 0.0):
         """
         Create an n_states × n_states transition matrix where
         - each row i has A[i,i] = self_prob
@@ -1769,7 +1826,7 @@ class pyMethObj():
         return A
     
     @staticmethod
-    def init_means(n_states, radius=3.0, start_angle=0.0):
+    def init_means(n_states, radius = 3.0, start_angle = 0.0):
         """
         Initialize (n_states × 2) means so that:
         - The first coordinate (x) is always ≥ 0.
@@ -1790,7 +1847,7 @@ class pyMethObj():
 
         return np.vstack([np.array([0,0]),np.column_stack([x, y])])
     
-    def mixed_bb(self, c1=1e-3, max_iter=10):
+    def mixed_bb(self, c1 = 1e-3, max_iter = 10):
         # initial GLS to get β and φ
         gls_res = self.gls(c1)
         β = gls_res.x[:self.p]
@@ -1900,7 +1957,7 @@ class pyMethObj():
                               ncpu: int = 1,
                               maxiter: int = 500,
                               maxfev: int = 500,
-                              chunksize: int = 1) -> None:
+                              chunksize: int = 1000) -> None:
         """
         Identify co-distributed regions of CpGs with similar methylation patterns.
         
@@ -2315,8 +2372,8 @@ class pyMethObj():
         #Remove nans from calculation
         X=X[~np.isnan(total)]
         X_star=X_star[~np.isnan(total)]
-        total=total[~np.isnan(total)]
         count=count[~np.isnan(total)]
+        total=total[~np.isnan(total)]
 
         # Reshape beta into segments for mu and phi
         beta_mu = beta[:n_param_abd]
@@ -2438,7 +2495,7 @@ class pyMethObj():
                          prop_pos: float = 0.5,
                          sample_size: int = 100,
                          ncpu: int = 1,
-                         chunksize: int = 1) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, np.ndarray, List]]:
+                         chunksize: int = 1000) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, np.ndarray, List]]:
         """
         Simulate methylation data based on fitted beta-binomial models.
         
