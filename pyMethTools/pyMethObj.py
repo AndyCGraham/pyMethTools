@@ -93,8 +93,17 @@ class pyMethObj():
             )
         """
 
+        # Check methylation data is as expected
+        assert isinstance(meth,np.ndarray), "meth must be a 2d numpy array"
+        assert len(meth.shape) == 2, "meth must be a 2d numpy array"
+        assert np.all(meth % 1 == 0), "meth must contain counts, e.g. 1.0 or 1 not 1.05"
+        assert isinstance(coverage,np.ndarray), "coverage must be a 2d numpy array"
+        assert len(coverage.shape) == 2, "coverage must be a 2d numpy array"
+        assert np.all(coverage % 1 == 0), "coverage must contain counts, e.g. 1.0 or 1 not 1.05"
+        assert np.all(coverage - meth >= 0), "coverage counts must be at least equal to their respective meth count"
         assert meth.shape == coverage.shape, "'meth' and 'coverage' must have the same shape"
         assert meth.shape[0] == len(target_regions), "Length of 'target_regions' should be equal to the number of rows (cpgs) in meth"
+
         if genomic_positions is not None:
             assert meth.shape[0] == len(genomic_positions), "Length of 'genomic_positions' should be equal to the number of rows (cpgs) in meth"
             isinstance(genomic_positions,np.ndarray), "'genomic_positions' should be a numpy array of integer positions"
@@ -839,6 +848,7 @@ class pyMethObj():
             contrast: Optional[Union[Dict[str, float], np.ndarray]]=None,
             padjust_method: str='fdr_bh',
             find_dmrs: str='binary_search',
+            test_dmr_sig: bool=True,
             prop_sig: float=0.5,
             fdr_thresh: float=0.1,
             max_gap: int=10000,
@@ -868,6 +878,9 @@ class pyMethObj():
             - 'binary_search': Use binary search to find significant regions.
             - 'HMM': Use a Hidden Markov Model to identify regions.
             - None: Do not identify DMRs.
+        test_dmr_sig : bool, default True
+            Whether to test the statistical signficance of found dmrs using a mixed-effects beta-binomial 
+            regression.
         prop_sig : float, default 0.5
             Proportion of significant CpGs required to define a DMR.
         fdr_thresh : float, default 0.1
@@ -939,13 +952,14 @@ class pyMethObj():
 
         if find_dmrs == 'binary_search':
             dmr_res = self.find_significant_regions(cpg_res,prop_sig=prop_sig,fdr_thresh=fdr_thresh,max_gap=max_gap,
-                                                    max_gap_cpgs=max_gap_cpgs, coef=coef_indices)
+                                                    max_gap_cpgs=max_gap_cpgs, coef=coef_indices, test_sig=test_dmr_sig)
             return cpg_res, dmr_res
         
         elif find_dmrs == 'HMM':
             dmr_res = self.find_significant_regions_HMM(cpg_res, n_states=n_states, min_cpgs=min_cpgs, fdr_thresh=fdr_thresh, 
                                                         prop_sig_thresh=prop_sig, state_labels=state_labels, 
-                                                        hmm_plots=False, hmm_internals=False, coef=coef_indices)
+                                                        hmm_plots=False, hmm_internals=False, coef=coef_indices, 
+                                                        test_sig=test_dmr_sig)
             return cpg_res, dmr_res
         
         else:
@@ -1261,17 +1275,17 @@ class pyMethObj():
                 end, best_num_sig, _, final_prop, best_region = candidate_regions[0]
                 num_cpgs = len(best_region)
 
-                # Extract counts & coverage for the region.
-                count_vec = self.meth[(self.chr == chr_name) &
-                                    (self.genomic_positions >= best_region['pos'].iloc[0]) &
-                                    (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten()
-                total_vec = self.coverage[(self.chr == chr_name) &
+                if test_sig:
+                    # Extract counts & coverage for the region.
+                    count_vec = self.meth[(self.chr == chr_name) &
                                         (self.genomic_positions >= best_region['pos'].iloc[0]) &
                                         (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten()
-                cpg_idx = np.tile(np.arange(num_cpgs), self.X.shape[0])
-                sample_idx = np.repeat(np.arange(self.X.shape[0]), num_cpgs)
+                    total_vec = self.coverage[(self.chr == chr_name) &
+                                            (self.genomic_positions >= best_region['pos'].iloc[0]) &
+                                            (self.genomic_positions <= best_region['pos'].iloc[-1])].T.flatten()
+                    cpg_idx = np.tile(np.arange(num_cpgs), self.X.shape[0])
+                    sample_idx = np.repeat(np.arange(self.X.shape[0]), num_cpgs)
 
-                if test_sig:
                     # Full PQL mixed-effects fit
                     full = FitRegion(
                         X = np.repeat(self.X, num_cpgs, axis=0),
@@ -2315,8 +2329,8 @@ class pyMethObj():
         #Remove nans from calculation
         X=X[~np.isnan(total)]
         X_star=X_star[~np.isnan(total)]
-        total=total[~np.isnan(total)]
         count=count[~np.isnan(total)]
+        total=total[~np.isnan(total)]
 
         # Reshape beta into segments for mu and phi
         beta_mu = beta[:n_param_abd]
