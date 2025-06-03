@@ -1422,8 +1422,8 @@ class pyMethObj():
                                      n_states: int = 3, 
                                      min_cpgs: int = 5, 
                                      fdr_thresh: float = 0.05, 
-                                     prop_sig_thresh: float = 0.5, 
-                                     max_gap: int = 5000, 
+                                     prop_sig_thresh: float = 0.15, 
+                                     max_gap: int = 15000, 
                                      state_labels: Optional[Dict[int, str]] = None, 
                                      hmm_plots: bool = False, 
                                      hmm_internals: bool = False,
@@ -1453,9 +1453,9 @@ class pyMethObj():
             Minimum number of consecutive CpGs to report a region
         fdr_thresh : float, default 0.05
             FDR threshold for significance
-        prop_sig_thresh : float, default 0.5
+        prop_sig_thresh : float, default 0.15
             Minimum proportion of significant CpGs required
-        max_gap : int, default 5000
+        max_gap : int, default 15000
             Maximum allowed gap between adjacent CpGs in a region
         state_labels : dict or None
             Optional mapping from state index to state name
